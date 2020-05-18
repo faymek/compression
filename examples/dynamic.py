@@ -2,6 +2,9 @@ import tensorflow.compat.v1 as tf
 import tensorflow_compression as tfc
 from tensorflow_compression.python.layers import parameterizers
 from tensorflow_compression.python.ops import padding_ops
+from tensorflow_compression.python.ops import math_ops
+from tensorflow_compression.python.ops import range_coding_ops
+from tensorflow.python.keras.engine import input_spec
 
 class DynamicSignalConv2D(tfc.SignalConv2D):
   def __init__(self, *args, **kwargs):
@@ -11,7 +14,8 @@ class DynamicSignalConv2D(tfc.SignalConv2D):
 
   def build(self, input_shape):
     # Create a trainable weight variable for this layer.
-    super(DynamicSignalConv2D, self).build(input_shape)  # Be sure to call this at the end
+    super(DynamicSignalConv2D, self).build(input_shape)
+    self.input_spec = None
 
 
   def call(self, inputs):
@@ -22,6 +26,8 @@ class DynamicSignalConv2D(tfc.SignalConv2D):
     input_shape = inputs.shape
     channel_axis = {"channels_first": 1, "channels_last": -1}[self.data_format]
     self.active_in_filters = input_shape.as_list()[channel_axis]
+    # effects 4 up/down conv methods, and compute_output_shape
+    self._filters = self.active_out_filters
 
     # Not for all possible combinations of (`kernel_support`, `corr`,
     # `strides_up`, `strides_down`) TF ops exist. We implement some additional
@@ -49,6 +55,10 @@ class DynamicSignalConv2D(tfc.SignalConv2D):
       corr = False
       slices = self._rank * (slice(None, None, -1),) + (slice(0, self.active_in_filters), slice(0, self.active_out_filters))
       kernel = kernel[slices]
+    else:
+      slices = self._rank * (slice(None),) + (slice(0, self.active_in_filters), slice(0, self.active_out_filters))
+      kernel = kernel[slices]
+    
 
     # Compute amount of necessary padding, and determine whether to use built-in
     # padding or to pre-pad with a separate op.
@@ -69,7 +79,6 @@ class DynamicSignalConv2D(tfc.SignalConv2D):
             outputs, self._padded_tuple(padding, (0, 0)), self._pad_mode)
         prepadding = padding
         padding = self._rank * ((0, 0),)
-
     # Compute the convolution/correlation. Prefer EXPLICIT padding ops where
     # possible, but don't use them to implement VALID padding.
     if (corr and
@@ -93,7 +102,6 @@ class DynamicSignalConv2D(tfc.SignalConv2D):
           outputs, kernel, prepadding)
     else:
       self._raise_notimplemented()
-
     # Now, add bias if requested.
     if self.use_bias:
       bias = self.bias[slice(0,self.active_out_filters)]
@@ -171,7 +179,7 @@ class DynamicSignalConv2D(tfc.SignalConv2D):
         importance = tf.concat([importance[:self.active_out_filters], protect], axis=0)
       sorted_idx = tf.argsort(importance, direction='DESCENDING')
       self._kernel = tf.gather(self._kernel, sorted_idx, axis=3)
-      if self._bias is not None:
+      if self.use_bias:
         self._bias = tf.gather(self._bias, sorted_idx, axis=0)
       if isinstance(self.activation, DynamicGDN):
         self.activation.sort_weight(sorted_idx)
@@ -185,12 +193,12 @@ class DynamicEntropyBottleneck(tfc.EntropyBottleneck):
 
   def build(self, input_shape):
     # Create a trainable weight variable for this layer.
-    super(DynamicEntropyBottleneck, self).build(input_shape)  # Be sure to call this at the end
+    super(DynamicEntropyBottleneck, self).build(input_shape)
 
   def _logits_cumulative(self, inputs, stop_gradient):
     logits = inputs
-    input_shape = inputs.shape
-    self.active_out_filters = input_shape.as_list()[0]
+    _, _, channels, _ = self._get_input_dims()
+    self.active_out_filters = channels
     slices = (slice(0, self.active_out_filters), slice(None), slice(None))
 
     for i in range(len(self.filters) + 1):
@@ -213,12 +221,170 @@ class DynamicEntropyBottleneck(tfc.EntropyBottleneck):
 
     return logits
 
+  def _quantize(self, inputs, mode):
+    # Add noise or quantize (and optionally dequantize in one step).
+    half = tf.constant(.5, dtype=self.dtype)
+    _, _, channels, input_slices = self._get_input_dims()
+    self.active_out_filters = channels
+
+    if mode == "noise":
+      noise = tf.random.uniform(tf.shape(inputs), -half, half)
+      return tf.math.add_n([inputs, noise])
+
+    medians = self._medians[:self.active_out_filters]
+    medians = medians[input_slices]
+    outputs = tf.math.floor(inputs + (half - medians))
+
+    if mode == "dequantize":
+      outputs = tf.cast(outputs, self.dtype)
+      return outputs + medians
+    else:
+      assert mode == "symbols", mode
+      outputs = tf.cast(outputs, tf.int32)
+      return outputs
+
+  def _dequantize(self, inputs, mode):
+    _, _, _, input_slices = self._get_input_dims()
+    medians = self._medians[:self.active_out_filters]
+    medians = medians[input_slices]
+    outputs = tf.cast(inputs, self.dtype)
+    return outputs + medians
+
+
+  def compress(self, inputs):
+    with tf.name_scope(self._name_scope()):
+      inputs = tf.convert_to_tensor(inputs, dtype=self.dtype)
+      if not self.built:
+        # Check input assumptions set before layer building, e.g. input rank.
+        input_spec.assert_input_compatibility(
+            self.input_spec, inputs, self.name)
+        if self.dtype is None:
+          self._dtype = inputs.dtype.base_dtype.name
+        self.build(inputs.shape)
+
+      # Check input assumptions set after layer building, e.g. input shape.
+      if not tf.executing_eagerly():
+        input_spec.assert_input_compatibility(
+            self.input_spec, inputs, self.name)
+        if inputs.dtype.is_integer:
+          raise ValueError(
+              "{} can't take integer inputs.".format(type(self).__name__))
+
+      symbols = self._quantize(inputs, "symbols")
+      assert symbols.dtype == tf.int32
+
+      ndim = self.input_spec.ndim
+      indexes = self._prepare_indexes(shape=tf.shape(symbols)[1:])
+      broadcast_indexes = (indexes.shape.ndims != ndim)
+      if broadcast_indexes:
+        # We can't currently broadcast over anything else but the batch axis.
+        assert indexes.shape.ndims == ndim - 1
+        args = (symbols,)
+      else:
+        args = (symbols, indexes)
+
+      
+
+      def loop_body(args):
+        string = range_coding_ops.unbounded_index_range_encode(
+            args[0], indexes if broadcast_indexes else args[1],
+            self._quantized_cdf[:self.active_out_filters], 
+            self._cdf_length[:self.active_out_filters], 
+            self._offset[:self.active_out_filters],
+            precision=self.range_coder_precision, overflow_width=4,
+            debug_level=0)
+        return string
+
+      strings = tf.map_fn(
+          loop_body, args, dtype=tf.string,
+          back_prop=False, name="compress")
+
+      if not tf.executing_eagerly():
+        strings.set_shape(inputs.shape[:1])
+
+      return strings
+
+
   def sort_weight(self, sorted_idx):
+    self._medians = tf.gather(self._medians, sorted_idx, axis=0)
+    self._quantized_cdf = tf.gather(self._quantized_cdf, sorted_idx, axis=0)
+    self._cdf_length = tf.gather(self._cdf_length, sorted_idx, axis=0)
+    self._offset = tf.gather(self._offset, sorted_idx, axis=0)
     for i in range(len(self.filters) + 1):
       self._matrices[i] = tf.gather(self._matrices[i], sorted_idx, axis=0)
       self._biases[i] = tf.gather(self._biases[i], sorted_idx, axis=0)
       if i < len(self._factors):
         self._factors[i] = tf.gather(self._factors[i], sorted_idx, axis=0)
+      
+
+class DynamicGaussianConditional(tfc.GaussianConditional):
+  def __init__(self, *args, **kwargs):
+    super(DynamicGaussianConditional, self).__init__(*args, **kwargs)
+    self.active_out_filters = None
+
+  def build(self, input_shape):
+    # Create a trainable weight variable for this layer.
+    super(DynamicGaussianConditional, self).build(input_shape)
+
+  
+  def compress(self, inputs):
+    with tf.name_scope(self._name_scope()):
+      inputs = tf.convert_to_tensor(inputs, dtype=self.dtype)
+      if not self.built:
+        # Check input assumptions set before layer building, e.g. input rank.
+        input_spec.assert_input_compatibility(
+            self.input_spec, inputs, self.name)
+        if self.dtype is None:
+          self._dtype = inputs.dtype.base_dtype.name
+        self.build(inputs.shape)
+
+      # Check input assumptions set after layer building, e.g. input shape.
+      if not tf.executing_eagerly():
+        input_spec.assert_input_compatibility(
+            self.input_spec, inputs, self.name)
+        if inputs.dtype.is_integer:
+          raise ValueError(
+              "{} can't take integer inputs.".format(type(self).__name__))
+
+      symbols = self._quantize(inputs, "symbols")
+      assert symbols.dtype == tf.int32
+
+      ndim = self.input_spec.ndim
+      indexes = self._prepare_indexes(shape=tf.shape(symbols)[1:])
+      broadcast_indexes = (indexes.shape.ndims != ndim)
+      if broadcast_indexes:
+        # We can't currently broadcast over anything else but the batch axis.
+        assert indexes.shape.ndims == ndim - 1
+        args = (symbols,)
+      else:
+        args = (symbols, indexes)
+
+      
+
+      def loop_body(args):
+        string = range_coding_ops.unbounded_index_range_encode(
+            args[0], indexes if broadcast_indexes else args[1],
+            self._quantized_cdf[:self.active_out_filters], 
+            self._cdf_length[:self.active_out_filters], 
+            self._offset[:self.active_out_filters],
+            precision=self.range_coder_precision, overflow_width=4,
+            debug_level=0)
+        return string
+
+      strings = tf.map_fn(
+          loop_body, args, dtype=tf.string,
+          back_prop=False, name="compress")
+
+      if not tf.executing_eagerly():
+        strings.set_shape(inputs.shape[:1])
+
+      return strings
+
+
+  def sort_weight(self, sorted_idx):
+    self._quantized_cdf = tf.gather(self._quantized_cdf, sorted_idx, axis=0)
+    self._cdf_length = tf.gather(self._cdf_length, sorted_idx, axis=0)
+    self._offset = tf.gather(self._offset, sorted_idx, axis=0)
 
 
 class DynamicGDN(tfc.GDN):
@@ -228,7 +394,8 @@ class DynamicGDN(tfc.GDN):
 
   def build(self, input_shape):
     # Create a trainable weight variable for this layer.
-    super(DynamicGDN, self).build(input_shape)  # Be sure to call this at the end
+    super(DynamicGDN, self).build(input_shape)
+    self.input_spec = None
 
   def call(self, inputs):
     inputs = tf.convert_to_tensor(inputs, dtype=self.dtype)

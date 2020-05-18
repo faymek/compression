@@ -380,8 +380,6 @@ def get_uninitialized_variables(sess):
 def test_compress(args):
   """Compresses an image."""
 
-
-
   # Load input image and add batch dimension.
   x = read_png(args.input_file)
   x = tf.expand_dims(x, 0)
@@ -429,7 +427,7 @@ def test_compress(args):
   latest = tf.train.latest_checkpoint(checkpoint_dir=args.checkpoint_dir)
   tf.train.Saver().restore(sess, save_path=latest)
 
-  active = 128
+  active = 192
   sorted_idx = reorg(analysis_transform, active, None, "head")
   reorg(synthesis_transform, active, sorted_idx, "tail")
   sorted_idx = reorg(hyper_analysis_transform, active, sorted_idx, "body")
@@ -440,6 +438,9 @@ def test_compress(args):
   y = analysis_transform(x)
   y_shape = tf.shape(y)
   z = hyper_analysis_transform(abs(y))
+
+  entropy_bottleneck.input_spec = tf.keras.layers.InputSpec(ndim=4, axes={3: active})
+
   z_hat, z_likelihoods = entropy_bottleneck(z, training=False)
   sigma = hyper_synthesis_transform(z_hat)
   sigma = sigma[:, :y_shape[1], :y_shape[2], :]
@@ -457,6 +458,7 @@ def test_compress(args):
   num_pixels = tf.cast(tf.reduce_prod(tf.shape(x)[:-1]), dtype=tf.float32)
 
   # Total number of bits divided by number of pixels.
+  y_bpp = tf.reduce_sum(tf.log(y_likelihoods))  / (-np.log(2) * num_pixels)
   eval_bpp = (tf.reduce_sum(tf.log(y_likelihoods)) +
               tf.reduce_sum(tf.log(z_likelihoods))) / (-np.log(2) * num_pixels)
 
@@ -482,8 +484,8 @@ def test_compress(args):
 
   # If requested, transform the quantized image back and measure performance.
   if args.verbose:
-    eval_bpp, mse, psnr, msssim, num_pixels = sess.run(
-        [eval_bpp, mse, psnr, msssim, num_pixels])
+    y_bpp, eval_bpp, mse, psnr, msssim, num_pixels = sess.run(
+        [y_bpp, eval_bpp, mse, psnr, msssim, num_pixels])
 
     # The actual bits per pixel including overhead.
     bpp = len(packed.string) * 8 / num_pixels
@@ -493,6 +495,7 @@ def test_compress(args):
     print("Multiscale SSIM: {:0.4f}".format(msssim))
     print("Multiscale SSIM (dB): {:0.2f}".format(-10 * np.log10(1 - msssim)))
     print("Information content in bpp: {:0.4f}".format(eval_bpp))
+    print("Information content in y_bpp: {:0.4f}".format(y_bpp))
     print("Actual bits per pixel: {:0.4f}".format(bpp))
 
 def test_decompress(args):
