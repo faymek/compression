@@ -33,7 +33,7 @@ import tensorflow_compression as tfc  # pylint:disable=unused-import
 # Default URL to fetch metagraphs from.
 URL_PREFIX = "https://storage.googleapis.com/tensorflow_compression/metagraphs"
 # Default location to store cached metagraphs.
-METAGRAPH_CACHE = "/tmp/tfc_metagraphs"
+METAGRAPH_CACHE = "./tfc_metagraphs"
 
 
 def read_png(filename):

@@ -77,14 +77,6 @@ class AnalysisTransform(tf.keras.layers.Layer):
       tensor = layer(tensor)
     return tensor
 
-  def set_active(self, out_filters):
-    for layer in self._layers:
-      layer.active_out_filters = out_filters
-
-  def sort_filter(self):
-    for layer in self._layers:
-      layer.sort_filter()
-
 
 class SynthesisTransform(tf.keras.layers.Layer):
   """The synthesis transform."""
@@ -118,14 +110,6 @@ class SynthesisTransform(tf.keras.layers.Layer):
     for layer in self._layers:
       tensor = layer(tensor)
     return tensor
-
-  def set_active(self, out_filters):
-    for layer in self._layers[:-1]:
-      layer.active_out_filters = out_filters
-
-  def sort_filter(self):
-    for layer in self._layers[:-1]:
-      layer.sort_filter()
 
 
 class HyperAnalysisTransform(tf.keras.layers.Layer):
@@ -352,19 +336,6 @@ def compress(args):
       print("Actual bits per pixel: {:0.4f}".format(bpp))
 
 
-def reorg(trans, active_out_filters, sorted_idx, flag=None):
-  layers = trans._layers
-  if flag is "tail":
-    for layer in layers[:-1]:
-      layer.active_out_filters = active_out_filters
-      sorted_idx = layer.sort_filter(sorted_idx)
-    sorted_idx = layers[-1].sort_filter(sorted_idx, False)
-  else:  # head or body
-    for layer in layers:
-      layer.active_out_filters = active_out_filters
-      sorted_idx = layer.sort_filter(sorted_idx)
-  return sorted_idx
-
 
 def get_uninitialized_variables(sess):
   global_vars = tf.global_variables()
@@ -377,6 +348,122 @@ def get_uninitialized_variables(sess):
   return not_initialized_vars
 
 
+class DyTFC():
+  def __init__(self, num_filters):
+    self.num_filters = num_filters
+    self.analysis_transform = AnalysisTransform(num_filters)
+    self.synthesis_transform = SynthesisTransform(num_filters)
+    self.hyper_analysis_transform = HyperAnalysisTransform(num_filters)
+    self.hyper_synthesis_transform = HyperSynthesisTransform(num_filters)
+    self.entropy_bottleneck = DynamicEntropyBottleneck(name="entropy_bottleneck")
+    
+  def build(self, x):
+    self.x = x
+    self.x_shape = tf.shape(self.x)
+
+    # Transform and compress the image.
+    self.y = self.analysis_transform(self.x)
+    self.y_shape = tf.shape(self.y)
+    self.z = self.hyper_analysis_transform(abs(self.y))
+    self.z_shape = tf.shape(self.z)
+    self.z_hat, self.z_likelihoods = self.entropy_bottleneck(self.z, training=False)
+    sigma = self.hyper_synthesis_transform(self.z_hat)
+    self.sigma = sigma[:, :self.y_shape[1], :self.y_shape[2], :]
+    self.scale_table = np.exp(np.linspace(
+        np.log(SCALES_MIN), np.log(SCALES_MAX), SCALES_LEVELS))
+    self.conditional_bottleneck = DynamicGaussianConditional(self.sigma, self.scale_table, name="gaussian_conditional")
+    self.side_string = self.entropy_bottleneck.compress(self.z)
+    self.string = self.conditional_bottleneck.compress(self.y)
+
+    # Transform the quantized image back (if requested).
+    self.y_hat, self.y_likelihoods = self.conditional_bottleneck(self.y, training=False)
+    self.x_hat = self.synthesis_transform(self.y_hat)
+    self.x_hat = self.x_hat[:, :self.x_shape[1], :self.x_shape[2], :]
+
+    self.num_pixels = tf.cast(tf.reduce_prod(tf.shape(self.x)[:-1]), dtype=tf.float32)
+
+    # Total number of bits divided by number of pixels.
+    self.eval_bpp = (tf.reduce_sum(tf.log(self.y_likelihoods)) +
+                tf.reduce_sum(tf.log(self.z_likelihoods))) / (-np.log(2) * self.num_pixels)
+
+    x = self.x * 255
+    x_hat = tf.clip_by_value(self.x_hat, 0, 1)
+    x_hat = tf.round(x_hat * 255)
+
+    self.mse = tf.reduce_mean(tf.squared_difference(x, x_hat))
+    self.psnr = tf.squeeze(tf.image.psnr(x_hat, x, 255))
+    self.msssim = tf.squeeze(tf.image.ssim_multiscale(x_hat, x, 255))
+
+  def restore(self, sess, flag="latest"):
+    latest = tf.train.latest_checkpoint(checkpoint_dir=args.checkpoint_dir)
+    tf.train.Saver().restore(sess, save_path=latest)
+
+  def _reorg(self, trans, active_out_filters, sort_in, sort_out, flag=None):
+    layers = trans._layers
+    sorted_idx = sort_in
+    for layer in layers[:-1]:
+      layer.active_out_filters = active_out_filters
+      sorted_idx = layer.sort_filter(sorted_idx, True)
+    if flag is not "tail":
+      layers[-1].active_out_filters = active_out_filters
+    sorted_idx = layers[-1].sort_filter(sorted_idx, sort_out)
+    return sorted_idx
+
+  def reorg(self, active):
+    y_sorted_idx = self._reorg(self.analysis_transform,        active, False, True, "head")
+    self._reorg(               self.synthesis_transform,       active, y_sorted_idx, False, "tail")
+    z_sorted_idx = self._reorg(self.hyper_analysis_transform,  active, y_sorted_idx, True, "body")
+    self.entropy_bottleneck.sort_weight(z_sorted_idx)
+    self.entropy_bottleneck.input_spec = tf.keras.layers.InputSpec(ndim=4, axes={3: active})
+    sorted_idx = self._reorg(  self.hyper_synthesis_transform,   active, z_sorted_idx, y_sorted_idx, "body")
+
+    
+
+
+
+def new_compress(args):
+  """Compresses an image."""
+
+  # Load input image and add batch dimension.
+  x = read_png(args.input_file)
+  x = tf.expand_dims(x, 0)
+  x.set_shape([1, None, None, 3])
+
+  net = DyTFC(x,args.num_filters)
+
+  with tf.Session() as sess:
+    # Load the latest model checkpoint, get the compressed string and the tensor
+    # shapes.
+    latest = tf.train.latest_checkpoint(checkpoint_dir=args.checkpoint_dir)
+    tf.train.Saver().restore(sess, save_path=latest)
+    tensors = [net.string, net.side_string,
+               tf.shape(net.x)[1:-1], tf.shape(net.y)[1:-1], tf.shape(net.z)[1:-1]]
+    arrays = sess.run(tensors)
+
+    # Write a binary file with the shape information and the compressed string.
+    packed = tfc.PackedTensors()
+    packed.pack(tensors, arrays)
+    with open(args.output_file, "wb") as f:
+      f.write(packed.string)
+
+    # If requested, transform the quantized image back and measure performance.
+    if args.verbose:
+      eval_bpp, mse, psnr, msssim, num_pixels = sess.run(
+          [net.eval_bpp, net.mse, net.psnr, net.msssim, net.num_pixels])
+
+      # The actual bits per pixel including overhead.
+      bpp = len(packed.string) * 8 / num_pixels
+
+      print("Mean squared error: {:0.4f}".format(mse))
+      print("PSNR (dB): {:0.2f}".format(psnr))
+      print("Multiscale SSIM: {:0.4f}".format(msssim))
+      print("Multiscale SSIM (dB): {:0.2f}".format(-10 * np.log10(1 - msssim)))
+      print("Information content in bpp: {:0.4f}".format(eval_bpp))
+      print("Actual bits per pixel: {:0.4f}".format(bpp))
+
+
+
+
 def test_compress(args):
   """Compresses an image."""
 
@@ -386,94 +473,24 @@ def test_compress(args):
   x.set_shape([1, None, None, 3])
   x_shape = tf.shape(x)
 
-  # Instantiate model.
-  analysis_transform = AnalysisTransform(args.num_filters)
-  synthesis_transform = SynthesisTransform(args.num_filters)
-  hyper_analysis_transform = HyperAnalysisTransform(args.num_filters)
-  hyper_synthesis_transform = HyperSynthesisTransform(args.num_filters)
-  entropy_bottleneck = DynamicEntropyBottleneck(name="entropy_bottleneck")
-
-
-
-  # Transform and compress the image.
-  y = analysis_transform(x)
-  y_shape = tf.shape(y)
-  z = hyper_analysis_transform(abs(y))
-  z_hat, z_likelihoods = entropy_bottleneck(z, training=False)
-  sigma = hyper_synthesis_transform(z_hat)
-  sigma = sigma[:, :y_shape[1], :y_shape[2], :]
-  scale_table = np.exp(np.linspace(
-      np.log(SCALES_MIN), np.log(SCALES_MAX), SCALES_LEVELS))
-  conditional_bottleneck = tfc.GaussianConditional(sigma, scale_table)
-  side_string = entropy_bottleneck.compress(z)
-  string = conditional_bottleneck.compress(y)
-
-  # Transform the quantized image back (if requested).
-  y_hat, y_likelihoods = conditional_bottleneck(y, training=False)
-  x_hat = synthesis_transform(y_hat)
-  x_hat = x_hat[:, :x_shape[1], :x_shape[2], :]
-
-  num_pixels = tf.cast(tf.reduce_prod(tf.shape(x)[:-1]), dtype=tf.float32)
-
-  # Total number of bits divided by number of pixels.
-  eval_bpp = (tf.reduce_sum(tf.log(y_likelihoods)) +
-              tf.reduce_sum(tf.log(z_likelihoods))) / (-np.log(2) * num_pixels)
-
-
+  net = DyTFC(192)
+  net.build(x)
 
   sess =  tf.Session()
-    # Load the latest model checkpoint, get the compressed string and the tensor
-    # shapes.
   latest = tf.train.latest_checkpoint(checkpoint_dir=args.checkpoint_dir)
   tf.train.Saver().restore(sess, save_path=latest)
 
-  active = 192
-  sorted_idx = reorg(analysis_transform, active, None, "head")
-  reorg(synthesis_transform, active, sorted_idx, "tail")
-  sorted_idx = reorg(hyper_analysis_transform, active, sorted_idx, "body")
-  entropy_bottleneck.sort_weight(sorted_idx)
-  sorted_idx = reorg(hyper_synthesis_transform, active, sorted_idx, "body")
+  old_cb_weights = net.conditional_bottleneck.get_weights()
 
-    # Transform and compress the image.
-  y = analysis_transform(x)
-  y_shape = tf.shape(y)
-  z = hyper_analysis_transform(abs(y))
+  net.reorg(192)
+  net.build(x)
 
-  entropy_bottleneck.input_spec = tf.keras.layers.InputSpec(ndim=4, axes={3: active})
-
-  z_hat, z_likelihoods = entropy_bottleneck(z, training=False)
-  sigma = hyper_synthesis_transform(z_hat)
-  sigma = sigma[:, :y_shape[1], :y_shape[2], :]
-  scale_table = np.exp(np.linspace(
-      np.log(SCALES_MIN), np.log(SCALES_MAX), SCALES_LEVELS))
-  conditional_bottleneck = tfc.GaussianConditional(sigma, scale_table)
-  side_string = entropy_bottleneck.compress(z)
-  string = conditional_bottleneck.compress(y)
-
-  # Transform the quantized image back (if requested).
-  y_hat, y_likelihoods = conditional_bottleneck(y, training=False)
-  x_hat = synthesis_transform(y_hat)
-  x_hat = x_hat[:, :x_shape[1], :x_shape[2], :]
-
-  num_pixels = tf.cast(tf.reduce_prod(tf.shape(x)[:-1]), dtype=tf.float32)
-
-  # Total number of bits divided by number of pixels.
-  y_bpp = tf.reduce_sum(tf.log(y_likelihoods))  / (-np.log(2) * num_pixels)
-  eval_bpp = (tf.reduce_sum(tf.log(y_likelihoods)) +
-              tf.reduce_sum(tf.log(z_likelihoods))) / (-np.log(2) * num_pixels)
-
-  # Bring both images back to 0..255 range.
-  x *= 255
-  x_hat = tf.clip_by_value(x_hat, 0, 1)
-  x_hat = tf.round(x_hat * 255)
-
-  mse = tf.reduce_mean(tf.squared_difference(x, x_hat))
-  psnr = tf.squeeze(tf.image.psnr(x_hat, x, 255))
-  msssim = tf.squeeze(tf.image.ssim_multiscale(x_hat, x, 255))
-
-  tensors = [string, side_string,
-              tf.shape(x)[1:-1], tf.shape(y)[1:-1], tf.shape(z)[1:-1]]
   sess.run(tf.variables_initializer(get_uninitialized_variables(sess)))
+  net.conditional_bottleneck.set_weights(old_cb_weights)
+  
+  tensors = [net.string, net.side_string,
+              net.x_shape[1:-1], net.y_shape[1:-1], net.z_shape[1:-1]]
+   
   arrays = sess.run(tensors)
 
   # Write a binary file with the shape information and the compressed string.
@@ -484,8 +501,8 @@ def test_compress(args):
 
   # If requested, transform the quantized image back and measure performance.
   if args.verbose:
-    y_bpp, eval_bpp, mse, psnr, msssim, num_pixels = sess.run(
-        [y_bpp, eval_bpp, mse, psnr, msssim, num_pixels])
+    eval_bpp, mse, psnr, msssim, num_pixels = sess.run(
+        [net.eval_bpp, net.mse, net.psnr, net.msssim, net.num_pixels])
 
     # The actual bits per pixel including overhead.
     bpp = len(packed.string) * 8 / num_pixels
@@ -495,7 +512,6 @@ def test_compress(args):
     print("Multiscale SSIM: {:0.4f}".format(msssim))
     print("Multiscale SSIM (dB): {:0.2f}".format(-10 * np.log10(1 - msssim)))
     print("Information content in bpp: {:0.4f}".format(eval_bpp))
-    print("Information content in y_bpp: {:0.4f}".format(y_bpp))
     print("Actual bits per pixel: {:0.4f}".format(bpp))
 
 def test_decompress(args):

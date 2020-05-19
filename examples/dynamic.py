@@ -165,19 +165,24 @@ class DynamicSignalConv2D(tfc.SignalConv2D):
     else:
       return tf.TensorShape([batch] + spatial + [channels])
 
-  def sort_filter(self, sorted_idx, sort_out=True):
-    import numpy as np
+  def sort_filter(self, sort_in=True, sort_out=True):
+    # sort_in: idx/False
+    # sort_out: idx/True/False
     # sort in_channel by input idx from input layer
-    if sorted_idx is not None:
-      self._kernel = tf.gather(self._kernel, sorted_idx, axis=2)
+    if sort_in is not False:
+      self._kernel = tf.gather(self._kernel, sort_in, axis=2)
     # sort out_channel by calulate L1 norm
-    if sort_out:
-      importance = tf.reduce_sum(tf.abs(self.kernel), axis=[0,1,2])
-      endpoint = self.kernel.shape.as_list()[3]-self.active_out_filters
-      if endpoint > 0:
-        protect = tf.range(0, -endpoint, -1.0)
-        importance = tf.concat([importance[:self.active_out_filters], protect], axis=0)
-      sorted_idx = tf.argsort(importance, direction='DESCENDING')
+    sorted_idx = None
+    if sort_out is not False:
+      if sort_out is True:
+        importance = tf.reduce_sum(tf.abs(self.kernel), axis=[0,1,2])
+        endpoint = self.kernel.shape.as_list()[3]-self.active_out_filters
+        if endpoint > 0:
+          protect = tf.range(0, -endpoint, -1.0)
+          importance = tf.concat([importance[:self.active_out_filters], protect], axis=0)
+        sorted_idx = tf.argsort(importance, direction='DESCENDING')
+      else:
+        sorted_idx = sort_out 
       self._kernel = tf.gather(self._kernel, sorted_idx, axis=3)
       if self.use_bias:
         self._bias = tf.gather(self._bias, sorted_idx, axis=0)
@@ -250,7 +255,6 @@ class DynamicEntropyBottleneck(tfc.EntropyBottleneck):
     outputs = tf.cast(inputs, self.dtype)
     return outputs + medians
 
-
   def compress(self, inputs):
     with tf.name_scope(self._name_scope()):
       inputs = tf.convert_to_tensor(inputs, dtype=self.dtype)
@@ -283,12 +287,10 @@ class DynamicEntropyBottleneck(tfc.EntropyBottleneck):
       else:
         args = (symbols, indexes)
 
-      
-
       def loop_body(args):
         string = range_coding_ops.unbounded_index_range_encode(
             args[0], indexes if broadcast_indexes else args[1],
-            self._quantized_cdf[:self.active_out_filters], 
+            self._quantized_cdf[:self.active_out_filters,:], 
             self._cdf_length[:self.active_out_filters], 
             self._offset[:self.active_out_filters],
             precision=self.range_coder_precision, overflow_width=4,
@@ -359,17 +361,17 @@ class DynamicGaussianConditional(tfc.GaussianConditional):
       else:
         args = (symbols, indexes)
 
-      
-
       def loop_body(args):
         string = range_coding_ops.unbounded_index_range_encode(
             args[0], indexes if broadcast_indexes else args[1],
-            self._quantized_cdf[:self.active_out_filters], 
-            self._cdf_length[:self.active_out_filters], 
-            self._offset[:self.active_out_filters],
+            self._quantized_cdf, 
+            self._cdf_length, 
+            self._offset,
             precision=self.range_coder_precision, overflow_width=4,
             debug_level=0)
         return string
+
+      #print(symbols, indexes, self._quantized_cdf, self._cdf_length, self._offset)
 
       strings = tf.map_fn(
           loop_body, args, dtype=tf.string,
