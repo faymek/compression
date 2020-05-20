@@ -394,10 +394,6 @@ class DyTFC():
     self.psnr = tf.squeeze(tf.image.psnr(x_hat, x, 255))
     self.msssim = tf.squeeze(tf.image.ssim_multiscale(x_hat, x, 255))
 
-  def restore(self, sess, flag="latest"):
-    latest = tf.train.latest_checkpoint(checkpoint_dir=args.checkpoint_dir)
-    tf.train.Saver().restore(sess, save_path=latest)
-
   def _reorg(self, trans, active_out_filters, sort_in, sort_out, flag=None):
     layers = trans._layers
     sorted_idx = sort_in
@@ -411,57 +407,12 @@ class DyTFC():
 
   def reorg(self, active):
     y_sorted_idx = self._reorg(self.analysis_transform,        active, False, True, "head")
+    print(y_sorted_idx)
     self._reorg(               self.synthesis_transform,       active, y_sorted_idx, False, "tail")
     z_sorted_idx = self._reorg(self.hyper_analysis_transform,  active, y_sorted_idx, True, "body")
     self.entropy_bottleneck.sort_weight(z_sorted_idx)
     self.entropy_bottleneck.input_spec = tf.keras.layers.InputSpec(ndim=4, axes={3: active})
     sorted_idx = self._reorg(  self.hyper_synthesis_transform,   active, z_sorted_idx, y_sorted_idx, "body")
-
-    
-
-
-
-def new_compress(args):
-  """Compresses an image."""
-
-  # Load input image and add batch dimension.
-  x = read_png(args.input_file)
-  x = tf.expand_dims(x, 0)
-  x.set_shape([1, None, None, 3])
-
-  net = DyTFC(x,args.num_filters)
-
-  with tf.Session() as sess:
-    # Load the latest model checkpoint, get the compressed string and the tensor
-    # shapes.
-    latest = tf.train.latest_checkpoint(checkpoint_dir=args.checkpoint_dir)
-    tf.train.Saver().restore(sess, save_path=latest)
-    tensors = [net.string, net.side_string,
-               tf.shape(net.x)[1:-1], tf.shape(net.y)[1:-1], tf.shape(net.z)[1:-1]]
-    arrays = sess.run(tensors)
-
-    # Write a binary file with the shape information and the compressed string.
-    packed = tfc.PackedTensors()
-    packed.pack(tensors, arrays)
-    with open(args.output_file, "wb") as f:
-      f.write(packed.string)
-
-    # If requested, transform the quantized image back and measure performance.
-    if args.verbose:
-      eval_bpp, mse, psnr, msssim, num_pixels = sess.run(
-          [net.eval_bpp, net.mse, net.psnr, net.msssim, net.num_pixels])
-
-      # The actual bits per pixel including overhead.
-      bpp = len(packed.string) * 8 / num_pixels
-
-      print("Mean squared error: {:0.4f}".format(mse))
-      print("PSNR (dB): {:0.2f}".format(psnr))
-      print("Multiscale SSIM: {:0.4f}".format(msssim))
-      print("Multiscale SSIM (dB): {:0.2f}".format(-10 * np.log10(1 - msssim)))
-      print("Information content in bpp: {:0.4f}".format(eval_bpp))
-      print("Actual bits per pixel: {:0.4f}".format(bpp))
-
-
 
 
 def test_compress(args):
@@ -483,6 +434,7 @@ def test_compress(args):
   old_cb_weights = net.conditional_bottleneck.get_weights()
 
   net.reorg(192)
+  #net.reorg(192)
   net.build(x)
 
   sess.run(tf.variables_initializer(get_uninitialized_variables(sess)))
@@ -514,8 +466,55 @@ def test_compress(args):
     print("Information content in bpp: {:0.4f}".format(eval_bpp))
     print("Actual bits per pixel: {:0.4f}".format(bpp))
 
+
+  tf.train.Saver().save(sess,"./sort/model.ckpt")  
+
+
 def test_decompress(args):
-  pass
+  """Decompresses an image."""
+
+  # Read the shape information and compressed string from the binary file.
+  string = tf.placeholder(tf.string, [1])
+  side_string = tf.placeholder(tf.string, [1])
+  x_shape = tf.placeholder(tf.int32, [2])
+  y_shape = tf.placeholder(tf.int32, [2])
+  z_shape = tf.placeholder(tf.int32, [2])
+  with open(args.input_file, "rb") as f:
+    packed = tfc.PackedTensors(f.read())
+  tensors = [string, side_string, x_shape, y_shape, z_shape]
+  arrays = packed.unpack(tensors)
+
+  # Instantiate model.
+  synthesis_transform = SynthesisTransform(args.num_filters)
+  hyper_synthesis_transform = HyperSynthesisTransform(args.num_filters)
+  entropy_bottleneck = tfc.EntropyBottleneck(dtype=tf.float32)
+
+  # Decompress and transform the image back.
+  z_shape = tf.concat([z_shape, [args.num_filters]], axis=0)
+  z_hat = entropy_bottleneck.decompress(
+      side_string, z_shape, channels=args.num_filters)
+  sigma = hyper_synthesis_transform(z_hat)
+  sigma = sigma[:, :y_shape[0], :y_shape[1], :]
+  scale_table = np.exp(np.linspace(
+      np.log(SCALES_MIN), np.log(SCALES_MAX), SCALES_LEVELS))
+  conditional_bottleneck = tfc.GaussianConditional(
+      sigma, scale_table, dtype=tf.float32)
+  y_hat = conditional_bottleneck.decompress(string)
+  x_hat = synthesis_transform(y_hat)
+
+  # Remove batch dimension, and crop away any extraneous padding on the bottom
+  # or right boundaries.
+  x_hat = x_hat[0, :x_shape[0], :x_shape[1], :]
+
+  # Write reconstructed image out as a PNG file.
+  op = write_png(args.output_file, x_hat)
+
+  # Load the latest model checkpoint, and perform the above actions.
+  with tf.Session() as sess:
+    latest = tf.train.latest_checkpoint(checkpoint_dir=args.checkpoint_dir)
+    tf.train.Saver().restore(sess, save_path=latest)
+    sess.run(op, feed_dict=dict(zip(tensors, arrays)))
+
 
 def decompress(args):
   """Decompresses an image."""
@@ -655,7 +654,7 @@ def main(args):
   elif args.command == "decompress":
     if not args.output_file:
       args.output_file = args.input_file + ".png"
-    decompress(args)
+    test_decompress(args)
 
 #%%
 

@@ -5,6 +5,7 @@ from tensorflow_compression.python.ops import padding_ops
 from tensorflow_compression.python.ops import math_ops
 from tensorflow_compression.python.ops import range_coding_ops
 from tensorflow.python.keras.engine import input_spec
+import numpy as np
 
 class DynamicSignalConv2D(tfc.SignalConv2D):
   def __init__(self, *args, **kwargs):
@@ -169,6 +170,40 @@ class DynamicSignalConv2D(tfc.SignalConv2D):
     # sort_in: idx/False
     # sort_out: idx/True/False
     # sort in_channel by input idx from input layer
+    weights = self.get_weights()
+    new_weights = []
+    kernel = weights[0].reshape(self.kernel.shape)  # in case of rdft
+
+    if sort_in is not False:
+      kernel = kernel[:,:,sort_in,:] # axis=2
+    # sort out_channel by calulate L1 norm
+    sorted_idx = None
+    if sort_out is False:
+      new_weights = [kernel.reshape(weights[0].shape)] + weights[1:]
+
+    else:
+      if sort_out is True:
+        importance = np.sum(np.abs(kernel), axis=(0,1,2))
+        importance[self.active_out_filters:] = np.arange(0, kernel.shape[3]-self.active_out_filters, -1)
+        sorted_idx = np.argsort(-importance) # descending
+      else:
+        sorted_idx = sort_out
+      kernel = kernel = kernel[:,:,:,sorted_idx] # axis=3
+      new_weights.append(kernel.reshape(weights[0].shape))
+      if self.use_bias:
+        new_weights.append(weights[1][sorted_idx]) # bias axis=0
+      if isinstance(self.activation, DynamicGDN):
+        new_weights.append(weights[2][sorted_idx])  # beta axis=0
+        new_weights.append(weights[3][sorted_idx,:][:,sorted_idx]) # gamma axis=0,1
+    self.set_weights(new_weights)
+    return sorted_idx
+
+
+  def set_sort_filter_0(self, sort_in=True, sort_out=True):
+    # set weights version of sort_filter, no graph
+    # sort_in: idx/False
+    # sort_out: idx/True/False
+    # sort in_channel by input idx from input layer
     if sort_in is not False:
       self._kernel = tf.gather(self._kernel, sort_in, axis=2)
     # sort out_channel by calulate L1 norm
@@ -189,6 +224,7 @@ class DynamicSignalConv2D(tfc.SignalConv2D):
       if isinstance(self.activation, DynamicGDN):
         self.activation.sort_weight(sorted_idx)
     return sorted_idx
+
 
 
 class DynamicEntropyBottleneck(tfc.EntropyBottleneck):
@@ -306,8 +342,14 @@ class DynamicEntropyBottleneck(tfc.EntropyBottleneck):
 
       return strings
 
-
   def sort_weight(self, sorted_idx):
+    weights = self.get_weights()
+    new_weights = []
+    for i in range(len(weights)):
+      new_weights.append(weights[i][sorted_idx,...]) 
+      # matrix,bias,factor,11, quantiles,quantized_cdf,cdf_length
+
+  def sort_weight_0(self, sorted_idx):
     self._medians = tf.gather(self._medians, sorted_idx, axis=0)
     self._quantized_cdf = tf.gather(self._quantized_cdf, sorted_idx, axis=0)
     self._cdf_length = tf.gather(self._cdf_length, sorted_idx, axis=0)
@@ -383,7 +425,7 @@ class DynamicGaussianConditional(tfc.GaussianConditional):
       return strings
 
 
-  def sort_weight(self, sorted_idx):
+  def sort_weight_0(self, sorted_idx):
     self._quantized_cdf = tf.gather(self._quantized_cdf, sorted_idx, axis=0)
     self._cdf_length = tf.gather(self._cdf_length, sorted_idx, axis=0)
     self._offset = tf.gather(self._offset, sorted_idx, axis=0)
@@ -447,7 +489,5 @@ class DynamicGDN(tfc.GDN):
   def compute_output_shape(self, input_shape):
     return tf.TensorShape(input_shape)
 
-  def sort_weight(self, sorted_idx):
-    self.gamma = tf.gather(tf.gather(self.gamma, sorted_idx, axis=0) ,sorted_idx, axis=1)
-    self.beta = tf.gather(self.beta, sorted_idx, axis=0)
+
 
