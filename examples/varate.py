@@ -334,6 +334,7 @@ def compress(args):
       print("Multiscale SSIM (dB): {:0.2f}".format(-10 * np.log10(1 - msssim)))
       print("Information content in bpp: {:0.4f}".format(eval_bpp))
       print("Actual bits per pixel: {:0.4f}".format(bpp))
+      print(sess.run( tf.reduce_sum(tf.log(y_likelihoods), axis=(0,1,2)) / (-np.log(2) * num_pixels)) )
 
 
 
@@ -394,25 +395,27 @@ class DyTFC():
     self.psnr = tf.squeeze(tf.image.psnr(x_hat, x, 255))
     self.msssim = tf.squeeze(tf.image.ssim_multiscale(x_hat, x, 255))
 
-  def _reorg(self, trans, active_out_filters, sort_in, sort_out, flag=None):
+    self.vst = {v.name:v for v in tf.global_variables()}
+
+  def _reorg(self, sess, trans, active_out_filters, sort_in, sort_out, flag=None):
     layers = trans._layers
     sorted_idx = sort_in
     for layer in layers[:-1]:
       layer.active_out_filters = active_out_filters
-      sorted_idx = layer.sort_filter(sorted_idx, True)
+      sorted_idx = layer.sort_filter(sess, self.vst, sorted_idx, True)
     if flag is not "tail":
       layers[-1].active_out_filters = active_out_filters
-    sorted_idx = layers[-1].sort_filter(sorted_idx, sort_out)
+    sorted_idx = layers[-1].sort_filter(sess, self.vst, sorted_idx, sort_out)
     return sorted_idx
 
-  def reorg(self, active):
-    y_sorted_idx = self._reorg(self.analysis_transform,        active, False, True, "head")
-    print(y_sorted_idx)
-    self._reorg(               self.synthesis_transform,       active, y_sorted_idx, False, "tail")
-    z_sorted_idx = self._reorg(self.hyper_analysis_transform,  active, y_sorted_idx, True, "body")
-    self.entropy_bottleneck.sort_weight(z_sorted_idx)
+  def reorg(self, sess, active):
+    y_sorted_idx = self._reorg(sess, self.analysis_transform,        active, False, True, "head")
+    # print(sess.run(y_sorted_idx))
+    self._reorg(               sess, self.synthesis_transform,       active, y_sorted_idx, False, "tail")
+    z_sorted_idx = self._reorg(sess, self.hyper_analysis_transform,  active, y_sorted_idx, True, "body")
+    self.entropy_bottleneck.sort_weight(sess, self.vst, z_sorted_idx)
     self.entropy_bottleneck.input_spec = tf.keras.layers.InputSpec(ndim=4, axes={3: active})
-    sorted_idx = self._reorg(  self.hyper_synthesis_transform,   active, z_sorted_idx, y_sorted_idx, "body")
+    sorted_idx = self._reorg(  sess, self.hyper_synthesis_transform,   active, z_sorted_idx, y_sorted_idx, "body")
 
 
 def test_compress(args):
@@ -430,19 +433,18 @@ def test_compress(args):
   sess =  tf.Session()
   latest = tf.train.latest_checkpoint(checkpoint_dir=args.checkpoint_dir)
   tf.train.Saver().restore(sess, save_path=latest)
-
-  old_cb_weights = net.conditional_bottleneck.get_weights()
-
-  net.reorg(192)
-  #net.reorg(192)
-  net.build(x)
-
-  sess.run(tf.variables_initializer(get_uninitialized_variables(sess)))
-  net.conditional_bottleneck.set_weights(old_cb_weights)
   
+  #old_cb_weights = net.conditional_bottleneck.get_weights()
+  #net.reorg(sess, 192)
+  #net.build(x)
+  #sess.run(tf.variables_initializer(get_uninitialized_variables(sess)))
+  #net.conditional_bottleneck.set_weights(old_cb_weights)
+
+  tf.train.Saver().save(sess,"./sort/model.ckpt")  
+
   tensors = [net.string, net.side_string,
               net.x_shape[1:-1], net.y_shape[1:-1], net.z_shape[1:-1]]
-   
+  
   arrays = sess.run(tensors)
 
   # Write a binary file with the shape information and the compressed string.
@@ -465,9 +467,7 @@ def test_compress(args):
     print("Multiscale SSIM (dB): {:0.2f}".format(-10 * np.log10(1 - msssim)))
     print("Information content in bpp: {:0.4f}".format(eval_bpp))
     print("Actual bits per pixel: {:0.4f}".format(bpp))
-
-
-  tf.train.Saver().save(sess,"./sort/model.ckpt")  
+  #print(sess.run( tf.reduce_sum(tf.log(net.y_likelihoods), axis=(0,1,2)) / (-np.log(2) * net.num_pixels)) )
 
 
 def test_decompress(args):
