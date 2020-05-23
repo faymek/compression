@@ -246,8 +246,8 @@ def train(args):
   tf.summary.image("reconstruction", quantize_image(x_tilde))
 
   hooks = [
-      tf.train.StopAtStepHook(last_step=args.last_step),
-      tf.train.NanTensorHook(train_loss),
+    tf.train.StopAtStepHook(last_step=args.last_step),
+    tf.train.NanTensorHook(train_loss),
   ]
   with tf.train.MonitoredTrainingSession(
       hooks=hooks, checkpoint_dir=args.checkpoint_dir,
@@ -300,56 +300,48 @@ def test_train(args):
   y_tilde, y_likelihoods = conditional_bottleneck(y, training=True)
   x_tilde = synthesis_transform(y_tilde)
 
-  with tf.Session() as sess:
-    latest = tf.train.latest_checkpoint(checkpoint_dir="./tfc256-05")
-    tf.train.Saver().restore(sess, save_path=latest)
-
-  active_0 = 256
-  x_tilde_0 = synthesis_transform(y_tilde[:,:,:,:active_0])
-  train_bpp_0 = (tf.reduce_sum(tf.log(y_likelihoods[:,:,:,:active_0])) +
-               tf.reduce_sum(tf.log(z_likelihoods))) / (-np.log(2) * num_pixels)
-  train_mse_0 = tf.reduce_mean(tf.squared_difference(x, x_tilde_0)) * (255**2)
-
-  active_1 = 248
-  x_tilde_1 = synthesis_transform(y_tilde[:,:,:,:active_1])
-  train_bpp_1 = (tf.reduce_sum(tf.log(y_likelihoods[:,:,:,:active_1])) +
-               tf.reduce_sum(tf.log(z_likelihoods))) / (-np.log(2) * num_pixels)
-  train_mse_1 = tf.reduce_mean(tf.squared_difference(x, x_tilde_1)) * (255**2)
-
-  def RateOfWidth(W):
-    return 0.0267 * np.exp(0.0178*W)
-
-  # The rate-distortion cost.
-  train_loss = train_mse_0 + train_mse_1 \
-                + 1000*tf.squared_difference(train_bpp_0, RateOfWidth(active_0)) \
-                + 1000*tf.squared_difference(train_bpp_1, RateOfWidth(active_1)) 
-
-  # Minimize loss and auxiliary loss, and execute update op.
   step = tf.train.create_global_step()
   main_optimizer = tf.train.AdamOptimizer(learning_rate=1e-4)
-  main_step = main_optimizer.minimize(train_loss, global_step=step)
-
   aux_optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
-  aux_step = aux_optimizer.minimize(entropy_bottleneck.losses[0])
 
-  train_op = tf.group(main_step, aux_step, entropy_bottleneck.updates[0])
+  for exp in range(32,256,8):
 
-  tf.summary.scalar("loss", train_loss)
-  tf.summary.scalar("bpp", train_bpp_1)
-  tf.summary.scalar("mse", train_mse_1)
+    active_0 = exp
+    x_tilde_0 = synthesis_transform(y_tilde[:,:,:,:active_0])
+    train_bpp_0 = (tf.reduce_sum(tf.log(y_likelihoods[:,:,:,:active_0])) +
+                tf.reduce_sum(tf.log(z_likelihoods))) / (-np.log(2) * num_pixels)
+    train_mse_0 = tf.reduce_mean(tf.squared_difference(x, x_tilde_0)) * (255**2)
 
-  tf.summary.image("original", quantize_image(x))
-  tf.summary.image("reconstruction", quantize_image(x_tilde_1))
+    def RateOfWidth(W):
+      return 0.0267 * np.exp(0.0178*W)
 
-  hooks = [
-      tf.train.StopAtStepHook(last_step=args.last_step),
-      tf.train.NanTensorHook(train_loss),
-  ]
-  with tf.train.MonitoredTrainingSession(
-      hooks=hooks, checkpoint_dir=args.checkpoint_dir,
-      save_checkpoint_secs=300, save_summaries_secs=60) as sess:
-    while not sess.should_stop():
-      sess.run(train_op)
+    # The rate-distortion cost.
+    train_loss = train_mse_0 + 1000*tf.squared_difference(train_bpp_0, RateOfWidth(active_0))
+
+    # Minimize loss and auxiliary loss, and execute update op.
+    
+    
+    main_step = main_optimizer.minimize(train_loss, global_step=step)
+    aux_step = aux_optimizer.minimize(entropy_bottleneck.losses[0])
+
+    train_op = tf.group(main_step, aux_step, entropy_bottleneck.updates[0])
+
+    tf.summary.scalar("loss", train_loss)
+    tf.summary.scalar("bpp", train_bpp_0)
+    tf.summary.scalar("mse", train_mse_0)
+
+    tf.summary.image("original", quantize_image(x))
+    tf.summary.image("reconstruction", quantize_image(x_tilde_0))
+
+    hooks = [
+        tf.train.StopAtStepHook(last_step=args.last_step),
+        tf.train.NanTensorHook(train_loss),
+    ]
+    with tf.train.MonitoredTrainingSession(
+        hooks=hooks, checkpoint_dir=args.checkpoint_dir+"/%d"%exp,
+        save_checkpoint_secs=300, save_summaries_secs=60) as sess:
+        while not sess.should_stop():
+            sess.run(train_op)
 
 
 
@@ -544,18 +536,16 @@ def test_compress(args):
   sess =  tf.Session()
   latest = tf.train.latest_checkpoint(checkpoint_dir=args.checkpoint_dir)
   tf.train.Saver().restore(sess, save_path=latest)
-  print(sess.run( tf.reduce_sum(tf.log(net.y_likelihoods), axis=(0,1,2)) / (-np.log(2) * net.num_pixels)) )
-  return
 
   #vnames = ['gaussian_conditional/quantized_cdf:0', 'gaussian_conditional/cdf_length:0']
-  #old_cb_weights = net.conditional_bottleneck.get_weights()
+  old_cb_weights = net.conditional_bottleneck.get_weights()
 
   #print(old_cb_weights)
-  #net.set_active(192)
-  #net.build(x)
-  #sess.run(tf.variables_initializer(get_uninitialized_variables(sess)))
+  net.set_active(192)
+  net.build(x)
+  sess.run(tf.variables_initializer(get_uninitialized_variables(sess)))
   #sess.run(tf.variables_initializer([net.vst[name] for name in vnames]))
-  #net.conditional_bottleneck.set_weights(old_cb_weights)
+  net.conditional_bottleneck.set_weights(old_cb_weights)
 
   #
   #tf.train.Saver().save(sess,"./sort128/model.ckpt")  
@@ -585,7 +575,7 @@ def test_compress(args):
     print("Multiscale SSIM (dB): {:0.2f}".format(-10 * np.log10(1 - msssim)))
     print("Information content in bpp: {:0.4f}".format(eval_bpp))
     print("Actual bits per pixel: {:0.4f}".format(bpp))
-  
+  print(sess.run( tf.reduce_sum(tf.log(net.y_likelihoods), axis=(0,1,2)) / (-np.log(2) * net.num_pixels)) )
 
 
 def test_decompress(args):
@@ -793,7 +783,7 @@ def main(args):
   elif args.command == "compress":
     if not args.output_file:
       args.output_file = args.input_file + ".tfci"
-    test_compress(args)
+    compress(args)
   elif args.command == "decompress":
     if not args.output_file:
       args.output_file = args.input_file + ".png"

@@ -7,6 +7,24 @@ from tensorflow_compression.python.ops import range_coding_ops
 from tensorflow.python.keras.engine import input_spec
 import numpy as np
 
+class Intercept(tf.layers.Layer):
+  def __init__(self, start, stop, step=1):
+    super(Intercept, self).__init__()
+    self.start = start
+    self.stop = stop
+    self.step = step
+    self.const = tf.constant([1]*stop+[0]*(stop-start),dtype=tf.float32)
+
+  def build(self, input_shape):
+    #tf.set_random_seed(self.seed)
+    super(Intercept, self).build(input_shape)
+
+  def call(self, inputs):
+    mask = tf.random_crop(self.const, [self.stop])
+    rate = tf.reduce_sum(mask) / self.stop
+    output = inputs * mask / rate # broadcast (?,16,16,256) * (256,)
+    return output
+
 class DynamicSignalConv2D(tfc.SignalConv2D):
   def __init__(self, *args, **kwargs):
     super(DynamicSignalConv2D, self).__init__(*args, **kwargs)
@@ -185,7 +203,7 @@ class DynamicSignalConv2D(tfc.SignalConv2D):
     if sort_out is not False:
       if sort_out is True:
         importance = np.sum(np.abs(kernel), axis=(0,1,2))
-        importance[self.active_out_filters:] = np.arange(0, kernel.shape[3]-self.active_out_filters, -1)
+        importance[self.active_out_filters:] = np.arange(0, self.active_out_filters-kernel.shape[3], -1)
         sorted_idx = np.argsort(-importance) # descending
       else:
         sorted_idx = sort_out
@@ -205,6 +223,7 @@ class DynamicSignalConv2D(tfc.SignalConv2D):
     op_kernel = tf.assign(var_kernel, kernel.reshape(weights[0].shape))
     update_ops.append(op_kernel)
     sess.run(update_ops)
+    print(sorted_idx)
     return sorted_idx
 
 
