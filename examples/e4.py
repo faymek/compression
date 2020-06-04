@@ -300,31 +300,27 @@ def test_train(args):
   conditional_bottleneck = tfc.GaussianConditional(sigma, scale_table)
   y_tilde, y_likelihoods = conditional_bottleneck(y, training=True)
 
-  incep = Intercept(32,256,1)
-  y_incep = incep(y_tilde)
-  x_tilde = synthesis_transform(y_incep)
-
-  train_bpp = (tf.reduce_sum(tf.log(y_likelihoods)) +
-              tf.reduce_sum(tf.log(z_likelihoods))) / (-np.log(2) * num_pixels)
-  train_mse = tf.reduce_mean(tf.squared_difference(x, x_tilde)) * (255**2)
-
-  def RateOfWidth(W):
-    return 0.0267 * np.exp(0.0178*W)
-
-  dist = np.zeros(256)
-  dist[:32] = RateOfWidth(32)/32
-  for i in range(32,256):
-    dist[i] = RateOfWidth(i+1)-RateOfWidth(i)
-
-  target_bpp_dist = tf.constant(dist, dtype=tf.float32)
-  train_bpp_dist = ( tf.reduce_sum(tf.log(y_likelihoods), axis=(0,1,2)) + \
-              tf.reduce_sum(tf.log(z_likelihoods), axis=(0,1,2)) ) / (-np.log(2) * num_pixels)
-              
-  bpp_dist_diff = tf.reduce_sum(tf.squared_difference( 256*train_bpp_dist, 256*target_bpp_dist ))
   
+  rand_rate = tf.random_uniform([], minval=0.0, maxval = 0.75) # drop rate
+  random_tensor = tf.random_uniform([256], dtype=tf.float32)
+  keep_prob = 1 - rand_rate
+  scale = 1 / keep_prob
+  keep_mask = random_tensor >= rand_rate
+  y_tilde_drop = y_tilde * scale * tf.cast(keep_mask, tf.float32)
+
+  x_tilde = synthesis_transform(y_tilde_drop)
+
+  # Total number of bits divided by number of pixels.
+  train_bpp = (tf.reduce_sum(tf.log(y_likelihoods)) +
+               tf.reduce_sum(tf.log(z_likelihoods))) / (-np.log(2) * num_pixels)
+
+  # Mean squared error across pixels.
+  train_mse = tf.reduce_mean(tf.squared_difference(x, x_tilde))
+  # Multiply by 255^2 to correct for rescaling.
+  train_mse *= 255 ** 2
+
   # The rate-distortion cost.
-  train_loss = bpp_dist_diff + train_mse
-  # Minimize loss and auxiliary loss, and execute update op.
+  train_loss = args.lmbda * train_mse + train_bpp
 
   with tf.Session() as sess:
     latest = tf.train.latest_checkpoint(checkpoint_dir="./tfc256-05")
@@ -552,7 +548,7 @@ def test_compress(args):
           [eval_bpp, mse, psnr, msssim, num_pixels])
       bpp = len(packed.string) * 8 / v_num_pixels
 
-      print(active, v_eval_bpp, v_psnr, sep='\t')
+      print(active, v_eval_bpp, bpp, v_mse, v_psnr, v_msssim, v_num_pixels)
 
 
 def test_decompress(args):

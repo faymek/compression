@@ -56,15 +56,15 @@ class AnalysisTransform(tf.keras.layers.Layer):
         DynamicSignalConv2D(
             self.num_filters, (5, 5), name="layer_0", corr=True, strides_down=2,
             padding="same_zeros", use_bias=True,
-            activation=DynamicGDN(name="gdn_0")),
+            activation=tf.nn.relu),
         DynamicSignalConv2D(
             self.num_filters, (5, 5), name="layer_1", corr=True, strides_down=2,
             padding="same_zeros", use_bias=True,
-            activation=DynamicGDN(name="gdn_1")),
+            activation=tf.nn.relu),
         DynamicSignalConv2D(
             self.num_filters, (5, 5), name="layer_2", corr=True, strides_down=2,
             padding="same_zeros", use_bias=True,
-            activation=DynamicGDN(name="gdn_2")),
+            activation=tf.nn.relu),
         DynamicSignalConv2D(
             self.num_filters, (5, 5), name="layer_3", corr=True, strides_down=2,
             padding="same_zeros", use_bias=True,
@@ -90,15 +90,15 @@ class SynthesisTransform(tf.keras.layers.Layer):
         DynamicSignalConv2D(
             self.num_filters, (5, 5), name="layer_0", corr=False, strides_up=2,
             padding="same_zeros", use_bias=True,
-            activation=DynamicGDN(name="igdn_0", inverse=True)),
+            activation=tf.nn.relu),
         DynamicSignalConv2D(
             self.num_filters, (5, 5), name="layer_1", corr=False, strides_up=2,
             padding="same_zeros", use_bias=True,
-            activation=DynamicGDN(name="igdn_1", inverse=True)),
+            activation=tf.nn.relu),
         DynamicSignalConv2D(
             self.num_filters, (5, 5), name="layer_2", corr=False, strides_up=2,
             padding="same_zeros", use_bias=True,
-            activation=DynamicGDN(name="igdn_2", inverse=True)),
+            activation=tf.nn.relu),
         DynamicSignalConv2D(
             3, (5, 5), name="layer_3", corr=False, strides_up=2,
             padding="same_zeros", use_bias=True,
@@ -300,7 +300,7 @@ def test_train(args):
   conditional_bottleneck = tfc.GaussianConditional(sigma, scale_table)
   y_tilde, y_likelihoods = conditional_bottleneck(y, training=True)
 
-  incep = Intercept(32,256,1)
+  incep = InterceptNorate(32,256,1)
   y_incep = incep(y_tilde)
   x_tilde = synthesis_transform(y_incep)
 
@@ -308,26 +308,24 @@ def test_train(args):
               tf.reduce_sum(tf.log(z_likelihoods))) / (-np.log(2) * num_pixels)
   train_mse = tf.reduce_mean(tf.squared_difference(x, x_tilde)) * (255**2)
 
-  def RateOfWidth(W):
-    return 0.0267 * np.exp(0.0178*W)
+  def f(W):
+    return 10**(-W/32.0*0.6+4.1)
 
   dist = np.zeros(256)
-  dist[:32] = RateOfWidth(32)/32
+  dist[:32] = f(32)
   for i in range(32,256):
-    dist[i] = RateOfWidth(i+1)-RateOfWidth(i)
+    dist[i] = f(i+1)
 
-  target_bpp_dist = tf.constant(dist, dtype=tf.float32)
+  lambda_dist = tf.constant(dist, dtype=tf.float32)
   train_bpp_dist = ( tf.reduce_sum(tf.log(y_likelihoods), axis=(0,1,2)) + \
               tf.reduce_sum(tf.log(z_likelihoods), axis=(0,1,2)) ) / (-np.log(2) * num_pixels)
               
-  bpp_dist_diff = tf.reduce_sum(tf.squared_difference( 256*train_bpp_dist, 256*target_bpp_dist ))
-  
   # The rate-distortion cost.
-  train_loss = bpp_dist_diff + train_mse
+  train_loss = tf.reduce_sum(lambda_dist * train_bpp_dist) + train_mse
   # Minimize loss and auxiliary loss, and execute update op.
 
   with tf.Session() as sess:
-    latest = tf.train.latest_checkpoint(checkpoint_dir="./tfc256-05")
+    latest = tf.train.latest_checkpoint(checkpoint_dir="./e5")
     tf.train.Saver().restore(sess, save_path=latest)
   
   step = tf.train.create_global_step()

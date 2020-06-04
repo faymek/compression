@@ -47,128 +47,132 @@ def write_png(filename, image):
 class AnalysisTransform(tf.keras.layers.Layer):
   """The analysis transform."""
 
-  def __init__(self, num_filters, *args, **kwargs):
+  def __init__(self, num_filters, lmbda, *args, **kwargs):
     self.num_filters = num_filters
+    self.lmbda = lmbda
     super(AnalysisTransform, self).__init__(*args, **kwargs)
 
   def build(self, input_shape):
     self._layers = [
-        DynamicSignalConv2D(
+        Cond0SignalConv2D(
             self.num_filters, (5, 5), name="layer_0", corr=True, strides_down=2,
-            padding="same_zeros", use_bias=True,
+            padding="same_zeros", use_bias=False, 
             activation=DynamicGDN(name="gdn_0")),
-        DynamicSignalConv2D(
+        Cond0SignalConv2D(
             self.num_filters, (5, 5), name="layer_1", corr=True, strides_down=2,
-            padding="same_zeros", use_bias=True,
+            padding="same_zeros", use_bias=False, 
             activation=DynamicGDN(name="gdn_1")),
-        DynamicSignalConv2D(
+        Cond0SignalConv2D(
             self.num_filters, (5, 5), name="layer_2", corr=True, strides_down=2,
-            padding="same_zeros", use_bias=True,
+            padding="same_zeros", use_bias=False, 
             activation=DynamicGDN(name="gdn_2")),
-        DynamicSignalConv2D(
+        Cond0SignalConv2D(
             self.num_filters, (5, 5), name="layer_3", corr=True, strides_down=2,
-            padding="same_zeros", use_bias=True,
+            padding="same_zeros", use_bias=False, 
             activation=None),
     ]
     super(AnalysisTransform, self).build(input_shape)
 
   def call(self, tensor):
     for layer in self._layers:
-      tensor = layer(tensor)
+      tensor = layer(tensor, self.lmbda)
     return tensor
 
 
 class SynthesisTransform(tf.keras.layers.Layer):
   """The synthesis transform."""
 
-  def __init__(self, num_filters, *args, **kwargs):
+  def __init__(self, num_filters, lmbda, *args, **kwargs):
     self.num_filters = num_filters
+    self.lmbda = lmbda
     super(SynthesisTransform, self).__init__(*args, **kwargs)
 
   def build(self, input_shape):
     self._layers = [
-        DynamicSignalConv2D(
+        Cond0SignalConv2D(
             self.num_filters, (5, 5), name="layer_0", corr=False, strides_up=2,
-            padding="same_zeros", use_bias=True,
+            padding="same_zeros", use_bias=False, 
             activation=DynamicGDN(name="igdn_0", inverse=True)),
-        DynamicSignalConv2D(
+        Cond0SignalConv2D(
             self.num_filters, (5, 5), name="layer_1", corr=False, strides_up=2,
-            padding="same_zeros", use_bias=True,
+            padding="same_zeros", use_bias=False, 
             activation=DynamicGDN(name="igdn_1", inverse=True)),
-        DynamicSignalConv2D(
+        Cond0SignalConv2D(
             self.num_filters, (5, 5), name="layer_2", corr=False, strides_up=2,
-            padding="same_zeros", use_bias=True,
+            padding="same_zeros", use_bias=False, 
             activation=DynamicGDN(name="igdn_2", inverse=True)),
-        DynamicSignalConv2D(
+        Cond0SignalConv2D(
             3, (5, 5), name="layer_3", corr=False, strides_up=2,
-            padding="same_zeros", use_bias=True,
+            padding="same_zeros", use_bias=False, 
             activation=None),
     ]
     super(SynthesisTransform, self).build(input_shape)
 
   def call(self, tensor):
     for layer in self._layers:
-      tensor = layer(tensor)
+      tensor = layer(tensor, self.lmbda)
     return tensor
 
 
 class HyperAnalysisTransform(tf.keras.layers.Layer):
   """The analysis transform for the entropy model parameters."""
 
-  def __init__(self, num_filters, *args, **kwargs):
+  def __init__(self, num_filters, lmbda, *args, **kwargs):
     self.num_filters = num_filters
+    self.lmbda = lmbda
     super(HyperAnalysisTransform, self).__init__(*args, **kwargs)
 
   def build(self, input_shape):
     self._layers = [
-        DynamicSignalConv2D(
+        Cond0SignalConv2D(
             self.num_filters, (3, 3), name="layer_0", corr=True, strides_down=1,
-            padding="same_zeros", use_bias=True,
+            padding="same_zeros", use_bias=False, 
             activation=tf.nn.relu),
-        DynamicSignalConv2D(
+        Cond0SignalConv2D(
             self.num_filters, (5, 5), name="layer_1", corr=True, strides_down=2,
-            padding="same_zeros", use_bias=True,
+            padding="same_zeros", use_bias=False, 
             activation=tf.nn.relu),
-        DynamicSignalConv2D(
+        Cond0SignalConv2D(
             self.num_filters, (5, 5), name="layer_2", corr=True, strides_down=2,
-            padding="same_zeros", use_bias=False,
+            padding="same_zeros", use_bias=False, 
             activation=None),
     ]
     super(HyperAnalysisTransform, self).build(input_shape)
 
   def call(self, tensor):
     for layer in self._layers:
-      tensor = layer(tensor)
+      tensor = layer(tensor, self.lmbda)
     return tensor
 
 
 class HyperSynthesisTransform(tf.keras.layers.Layer):
   """The synthesis transform for the entropy model parameters."""
 
-  def __init__(self, num_filters, *args, **kwargs):
+  def __init__(self, num_filters, lmbda, *args, **kwargs):
     self.num_filters = num_filters
+    self.lmbda = lmbda
     super(HyperSynthesisTransform, self).__init__(*args, **kwargs)
 
   def build(self, input_shape):
     self._layers = [
-        DynamicSignalConv2D(
+        Cond0SignalConv2D(
             self.num_filters, (5, 5), name="layer_0", corr=False, strides_up=2,
-            padding="same_zeros", use_bias=True, kernel_parameterizer=None,
-            activation=tf.nn.relu),
-        DynamicSignalConv2D(
+            padding="same_zeros", use_bias=False, 
+            kernel_parameterizer=None, activation=tf.nn.relu),
+        Cond0SignalConv2D(
             self.num_filters, (5, 5), name="layer_1", corr=False, strides_up=2,
-            padding="same_zeros", use_bias=True, kernel_parameterizer=None,
-            activation=tf.nn.relu),
-        DynamicSignalConv2D(
+            padding="same_zeros", use_bias=False, 
+            kernel_parameterizer=None, activation=tf.nn.relu),
+        Cond0SignalConv2D(
             self.num_filters, (3, 3), name="layer_2", corr=False, strides_up=1,
-            padding="same_zeros", use_bias=True, kernel_parameterizer=None,
-            activation=None),
+            padding="same_zeros", use_bias=False, 
+            kernel_parameterizer=None, activation=None),
     ]
     super(HyperSynthesisTransform, self).build(input_shape)
 
   def call(self, tensor):
     for layer in self._layers:
-      tensor = layer(tensor)
+      tensor = layer(tensor, self.lmbda)
     return tensor
 
 
@@ -283,12 +287,18 @@ def test_train(args):
   # Get training patch from dataset.
   x = train_dataset.make_one_shot_iterator().get_next()
 
+  lmbda_log_dist = np.hstack((np.arange(0,7,0.01), np.arange(7,0,-0.01)))
+  lmbda_log_dist = tf.constant(lmbda_log_dist, dtype=tf.float32)
+  s = tf.data.Dataset.from_tensor_slices(lmbda_log_dist).repeat()
+  lmbda_log = s.make_one_shot_iterator().get_next() # levels
+  lmbda = 0.1 * tf.pow(2.0, lmbda_log - 6.0) # true value
+
   # Instantiate model.
-  analysis_transform = AnalysisTransform(args.num_filters)
-  synthesis_transform = SynthesisTransform(args.num_filters)
-  hyper_analysis_transform = HyperAnalysisTransform(args.num_filters)
-  hyper_synthesis_transform = HyperSynthesisTransform(args.num_filters)
-  entropy_bottleneck = DynamicEntropyBottleneck(name="entropy_bottleneck")
+  analysis_transform = AnalysisTransform(args.num_filters, lmbda_log)
+  synthesis_transform = SynthesisTransform(args.num_filters, lmbda_log)
+  hyper_analysis_transform = HyperAnalysisTransform(args.num_filters, lmbda_log)
+  hyper_synthesis_transform = HyperSynthesisTransform(args.num_filters, lmbda_log)
+  entropy_bottleneck = tfc.EntropyBottleneck()
 
   # Build autoencoder and hyperprior.
   y = analysis_transform(x)
@@ -299,42 +309,26 @@ def test_train(args):
       np.log(SCALES_MIN), np.log(SCALES_MAX), SCALES_LEVELS))
   conditional_bottleneck = tfc.GaussianConditional(sigma, scale_table)
   y_tilde, y_likelihoods = conditional_bottleneck(y, training=True)
+  x_tilde = synthesis_transform(y_tilde)
 
-  incep = Intercept(32,256,1)
-  y_incep = incep(y_tilde)
-  x_tilde = synthesis_transform(y_incep)
-
+  # Total number of bits divided by number of pixels.
   train_bpp = (tf.reduce_sum(tf.log(y_likelihoods)) +
-              tf.reduce_sum(tf.log(z_likelihoods))) / (-np.log(2) * num_pixels)
-  train_mse = tf.reduce_mean(tf.squared_difference(x, x_tilde)) * (255**2)
+               tf.reduce_sum(tf.log(z_likelihoods))) / (-np.log(2) * num_pixels)
 
-  def RateOfWidth(W):
-    return 0.0267 * np.exp(0.0178*W)
+  # Mean squared error across pixels.
+  train_mse = tf.reduce_mean(tf.squared_difference(x, x_tilde))
+  # Multiply by 255^2 to correct for rescaling.
+  train_mse *= 255 ** 2
 
-  dist = np.zeros(256)
-  dist[:32] = RateOfWidth(32)/32
-  for i in range(32,256):
-    dist[i] = RateOfWidth(i+1)-RateOfWidth(i)
-
-  target_bpp_dist = tf.constant(dist, dtype=tf.float32)
-  train_bpp_dist = ( tf.reduce_sum(tf.log(y_likelihoods), axis=(0,1,2)) + \
-              tf.reduce_sum(tf.log(z_likelihoods), axis=(0,1,2)) ) / (-np.log(2) * num_pixels)
-              
-  bpp_dist_diff = tf.reduce_sum(tf.squared_difference( 256*train_bpp_dist, 256*target_bpp_dist ))
-  
   # The rate-distortion cost.
-  train_loss = bpp_dist_diff + train_mse
-  # Minimize loss and auxiliary loss, and execute update op.
+  train_loss = lmbda * train_mse + train_bpp
 
-  with tf.Session() as sess:
-    latest = tf.train.latest_checkpoint(checkpoint_dir="./tfc256-05")
-    tf.train.Saver().restore(sess, save_path=latest)
-  
+  # Minimize loss and auxiliary loss, and execute update op.
   step = tf.train.create_global_step()
   main_optimizer = tf.train.AdamOptimizer(learning_rate=1e-4)
-  aux_optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
-
   main_step = main_optimizer.minimize(train_loss, global_step=step)
+
+  aux_optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
   aux_step = aux_optimizer.minimize(entropy_bottleneck.losses[0])
 
   train_op = tf.group(main_step, aux_step, entropy_bottleneck.updates[0])
@@ -347,14 +341,17 @@ def test_train(args):
   tf.summary.image("reconstruction", quantize_image(x_tilde))
 
   hooks = [
-      tf.train.StopAtStepHook(last_step=args.last_step),
-      tf.train.NanTensorHook(train_loss),
+    tf.train.StopAtStepHook(last_step=args.last_step),
+    tf.train.NanTensorHook(train_loss),
   ]
   with tf.train.MonitoredTrainingSession(
       hooks=hooks, checkpoint_dir=args.checkpoint_dir,
       save_checkpoint_secs=300, save_summaries_secs=60) as sess:
-      while not sess.should_stop():
-          sess.run(train_op)
+    while not sess.should_stop():
+      sess.run(train_op)
+
+
+
 
 
 def get_uninitialized_variables(sess):
@@ -462,11 +459,18 @@ def test_compress(args):
   x.set_shape([1, None, None, 3])
   x_shape = tf.shape(x)
 
+  step = 0.1
+  lmbda_log_dist = np.arange(0,7,step)
+  lmbda_log_dist = tf.constant(lmbda_log_dist, dtype=tf.float32)
+  s = tf.data.Dataset.from_tensor_slices(lmbda_log_dist)
+  lmbda_log = s.make_one_shot_iterator().get_next() # levels
+  lmbda = 0.1 * tf.pow(2.0, lmbda_log - 6.0) # true value
+
   # Instantiate model.
-  analysis_transform = AnalysisTransform(args.num_filters)
-  synthesis_transform = SynthesisTransform(args.num_filters)
-  hyper_analysis_transform = HyperAnalysisTransform(args.num_filters)
-  hyper_synthesis_transform = HyperSynthesisTransform(args.num_filters)
+  analysis_transform = AnalysisTransform(args.num_filters, lmbda_log)
+  synthesis_transform = SynthesisTransform(args.num_filters, lmbda_log)
+  hyper_analysis_transform = HyperAnalysisTransform(args.num_filters, lmbda_log)
+  hyper_synthesis_transform = HyperSynthesisTransform(args.num_filters, lmbda_log)
   entropy_bottleneck = tfc.EntropyBottleneck()
 
   # Transform and compress the image.
@@ -478,8 +482,7 @@ def test_compress(args):
   sigma = sigma[:, :y_shape[1], :y_shape[2], :]
   scale_table = np.exp(np.linspace(
       np.log(SCALES_MIN), np.log(SCALES_MAX), SCALES_LEVELS))
-  conditional_bottleneck = DynamicGaussianConditional(sigma, scale_table, name="gaussian_conditional")
-  
+  conditional_bottleneck = tfc.GaussianConditional(sigma, scale_table)
   side_string = entropy_bottleneck.compress(z)
   string = conditional_bottleneck.compress(y)
 
@@ -508,51 +511,24 @@ def test_compress(args):
     # shapes.
     latest = tf.train.latest_checkpoint(checkpoint_dir=args.checkpoint_dir)
     tf.train.Saver().restore(sess, save_path=latest)
-    #a = sess.run( tf.reduce_sum(tf.log(y_likelihoods), axis=(0,1,2)) / (-np.log(2) * num_pixels))
-    #b = sess.run( tf.reduce_sum(tf.log(z_likelihoods), axis=(0,1,2)) / (-np.log(2) * num_pixels))
-    #np.savetxt('ay.csv', a, delimiter = ',')
-    #np.savetxt('bz.csv', b, delimiter = ',')
-    #return
+    tensors = [string, side_string,
+               tf.shape(x)[1:-1], tf.shape(y)[1:-1], tf.shape(z)[1:-1]]
 
-    const = tf.constant([1]*256+[0]*224,dtype=tf.float32)
-    for active in range(256,31,-16):
-      #conditional_bottleneck.input_spec = tf.keras.layers.InputSpec(ndim=4, axes={3: active})
-      mask = const[256-active:512-active]
-      rate = tf.reduce_sum(mask) / 256
-      y_itc = y * mask/rate
+    for i in np.arange(0,7,step):
 
-      string = conditional_bottleneck.compress(y_itc)
-      y_itc_hat = conditional_bottleneck.decompress(string)
+      arrays, v_eval_bpp, v_mse, v_psnr, v_msssim, v_num_pixels = sess.run(
+          [tensors, eval_bpp, mse, psnr, msssim, num_pixels])
 
-      # Transform the quantized image back (if requested).
-      x_hat = synthesis_transform(y_itc_hat)
-      x_hat = x_hat[:, :x_shape[1], :x_shape[2], :]
-
-      eval_bpp = (tf.reduce_sum(tf.log(y_likelihoods[:,:,:,:active])) +
-                  tf.reduce_sum(tf.log(z_likelihoods))) / (-np.log(2) * num_pixels)
-
-    
-      x_hat = tf.clip_by_value(x_hat, 0, 1)
-      x_hat = tf.round(x_hat * 255)
-
-      mse = tf.reduce_mean(tf.squared_difference(x, x_hat))
-      psnr = tf.squeeze(tf.image.psnr(x_hat, x, 255))
-      msssim = tf.squeeze(tf.image.ssim_multiscale(x_hat, x, 255))
-        
-      tensors = [string, side_string,
-                tf.shape(x)[1:-1], tf.shape(y)[1:-1], tf.shape(z)[1:-1]]
-      arrays = sess.run(tensors)
-
-      # Write a binary file with the shape information and the compressed string.
       packed = tfc.PackedTensors()
       packed.pack(tensors, arrays)
-      
+      with open(args.output_file, "wb") as f:
+        f.write(packed.string)
 
-      v_eval_bpp, v_mse, v_psnr, v_msssim, v_num_pixels = sess.run(
-          [eval_bpp, mse, psnr, msssim, num_pixels])
+      # The actual bits per pixel including overhead.
       bpp = len(packed.string) * 8 / v_num_pixels
 
-      print(active, v_eval_bpp, v_psnr, sep='\t')
+      print(bpp, v_eval_bpp, v_mse, v_psnr, v_msssim)
+
 
 
 def test_decompress(args):
