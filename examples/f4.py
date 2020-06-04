@@ -326,6 +326,79 @@ def test_compress(args):
     latest = tf.train.latest_checkpoint(checkpoint_dir=args.checkpoint_dir)
     tf.train.Saver().restore(sess, save_path=latest)
 
+    f = open("result.csv", "w")
+    for i in np.arange(0,8):
+      for filename in glob.glob("kodak/*.png"):
+
+        v_lmbda_level, v_eval_bpp, v_mse, v_num_pixels = sess.run(
+            [lmbda_level, eval_bpp, mse, num_pixels], feed_dict={fn: filename, lmbda_level: i})
+
+        print("%.2f, %s, %.4f, %.4f, %d"%(v_lmbda_level, filename, v_eval_bpp, v_mse, v_num_pixels), file=f)
+    f.close()  
+
+
+
+def test_compress_mask(args):
+  """Compresses an image."""
+
+  # Load input image and add batch dimension.
+  fn = tf.placeholder(tf.string, [])
+
+  x = read_png(fn)
+  x = tf.expand_dims(x, 0)
+  x.set_shape([1, None, None, 3])
+  x_shape = tf.shape(x)
+
+  lmbda_level = tf.placeholder(tf.int32, [])
+  lmbda_onehot = tf.one_hot(tf.reshape(lmbda_level,[1]), depth=8)
+  lmbda = 0.1 * tf.pow(2.0, tf.cast(lmbda_level, tf.float32) - 6.0)
+
+  # Instantiate model.
+  analysis_transform = AnalysisTransform(args.num_filters, lmbda_onehot)
+  synthesis_transform = SynthesisTransform(args.num_filters, lmbda_onehot)
+  hyper_analysis_transform = HyperAnalysisTransform(args.num_filters, lmbda_onehot)
+  hyper_synthesis_transform = HyperSynthesisTransform(args.num_filters, lmbda_onehot)
+  entropy_bottleneck = tfc.EntropyBottleneck()
+
+  # Transform and compress the image.
+  y = analysis_transform(x)
+  y_shape = tf.shape(y)
+  z = hyper_analysis_transform(abs(y))
+  z_hat, z_likelihoods = entropy_bottleneck(z, training=False)
+  sigma = hyper_synthesis_transform(z_hat)
+  sigma = sigma[:, :y_shape[1], :y_shape[2], :]
+  scale_table = np.exp(np.linspace(
+      np.log(SCALES_MIN), np.log(SCALES_MAX), SCALES_LEVELS))
+  conditional_bottleneck = tfc.GaussianConditional(sigma, scale_table)
+  side_string = entropy_bottleneck.compress(z)
+  string = conditional_bottleneck.compress(y)
+
+  # Transform the quantized image back (if requested).
+  y_hat, y_likelihoods = conditional_bottleneck(y, training=False)
+  x_hat = synthesis_transform(y_hat)
+  x_hat = x_hat[:, :x_shape[1], :x_shape[2], :]
+
+  num_pixels = tf.cast(tf.reduce_prod(tf.shape(x)[:-1]), dtype=tf.float32)
+
+  # Total number of bits divided by number of pixels.
+  eval_bpp = (tf.reduce_sum(tf.log(y_likelihoods)) +
+              tf.reduce_sum(tf.log(z_likelihoods))) / (-np.log(2) * num_pixels)
+
+  # Bring both images back to 0..255 range.
+  x *= 255
+  x_hat = tf.clip_by_value(x_hat, 0, 1)
+  x_hat = tf.round(x_hat * 255)
+
+  mse = tf.reduce_mean(tf.squared_difference(x, x_hat))
+  psnr = tf.squeeze(tf.image.psnr(x_hat, x, 255))
+  msssim = tf.squeeze(tf.image.ssim_multiscale(x_hat, x, 255))
+
+  with tf.Session() as sess:
+    # Load the latest model checkpoint, get the compressed string and the tensor
+    # shapes.
+    latest = tf.train.latest_checkpoint(checkpoint_dir=args.checkpoint_dir)
+    tf.train.Saver().restore(sess, save_path=latest)
+
     tn_iter = {
       "trans": ["analysis", "hyper_analysis", "hyper_synthesis", "synthesis"],
       "layers": [4,3,3,3],
@@ -349,29 +422,6 @@ def test_compress(args):
         df = df.append(df1)
     df.to_csv("mask.csv") 
 
-    return
-
-    tensors = [string, side_string,
-               tf.shape(x)[1:-1], tf.shape(y)[1:-1], tf.shape(z)[1:-1]]
-
-    f = open("result.csv", "w")
-    for i in np.arange(0,8):
-      count_bpp = 0
-      count_np = 0
-      count_mse =0
-      for filename in glob.glob("kodak/*.png"):
-
-        v_lmbda_level, v_eval_bpp, v_mse, v_num_pixels = sess.run(
-            [lmbda_level, eval_bpp, mse, num_pixels], feed_dict={fn: filename, lmbda_level: i})
-
-
-        print("%.2f, %s, %.4f, %.4f, %d"%(v_lmbda_level, filename, v_eval_bpp, v_mse, v_num_pixels), file=f)
-        #print("%.2f\t%.4f\t%.4f"%(v_lmbda_level, v_eval_bpp, v_mse))
-        #count_bpp += v_eval_bpp * v_num_pixels
-        #count_mse += v_mse * v_num_pixels
-        #count_np += v_num_pixels
-      #print("%.2f\t%.4f\t%.4f"%(v_lmbda_level, count_bpp/count_np, count_mse/count_np))
-    f.close()  
 
 
 def parse_args(argv):

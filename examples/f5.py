@@ -298,9 +298,11 @@ def test_compress(args):
   lmbda_onehot = tf.one_hot(tf.reshape(lmbda_level,[1]), depth=8)
   lmbda = 0.1 * tf.pow(2.0, tf.cast(lmbda_level, tf.float32) - 6.0)
 
+  actives = [tf.constant(256), tf.constant(256), tf.constant(256), tf.constant(3)]
+  
   # Instantiate model.
   analysis_transform = AnalysisTransform(args.num_filters, lmbda_onehot)
-  synthesis_transform = SynthesisTransform(args.num_filters, lmbda_onehot)
+  synthesis_transform = SynthesisTransform(args.num_filters, lmbda_onehot, actives)
   hyper_analysis_transform = HyperAnalysisTransform(args.num_filters, lmbda_onehot)
   hyper_synthesis_transform = HyperSynthesisTransform(args.num_filters, lmbda_onehot)
   entropy_bottleneck = tfc.EntropyBottleneck()
@@ -330,40 +332,64 @@ def test_compress(args):
               tf.reduce_sum(tf.log(z_likelihoods))) / (-np.log(2) * num_pixels)
 
   # Bring both images back to 0..255 range.
-  x *= 255
+  x_im = x*255
   x_hat = tf.clip_by_value(x_hat, 0, 1)
-  x_hat = tf.round(x_hat * 255)
+  x_hat_im = tf.round(x_hat * 255)
 
-  mse = tf.reduce_mean(tf.squared_difference(x, x_hat))
-  psnr = tf.squeeze(tf.image.psnr(x_hat, x, 255))
-  msssim = tf.squeeze(tf.image.ssim_multiscale(x_hat, x, 255))
+  mse = tf.reduce_mean(tf.squared_difference(x_im, x_hat_im))
+  psnr = tf.squeeze(tf.image.psnr(x_hat_im, x_im, 255))
+  msssim = tf.squeeze(tf.image.ssim_multiscale(x_hat_im, x_im, 255))
 
   with tf.Session() as sess:
     # Load the latest model checkpoint, get the compressed string and the tensor
     # shapes.
     latest = tf.train.latest_checkpoint(checkpoint_dir=args.checkpoint_dir)
     tf.train.Saver().restore(sess, save_path=latest)
-    tensors = [string, side_string,
-               tf.shape(x)[1:-1], tf.shape(y)[1:-1], tf.shape(z)[1:-1]]
+
+    actives = [tf.placeholder(tf.int32, []), tf.placeholder(tf.int32, []), tf.placeholder(tf.int32, []), tf.constant(3)]
+    synthesis_transform.actives = actives
+    
+    x_hat = synthesis_transform(y_hat)
+    x_hat = x_hat[:, :x_shape[1], :x_shape[2], :]
+
+    num_pixels = tf.cast(tf.reduce_prod(tf.shape(x)[:-1]), dtype=tf.float32)
+
+    # Total number of bits divided by number of pixels.
+    eval_bpp = (tf.reduce_sum(tf.log(y_likelihoods)) +
+                tf.reduce_sum(tf.log(z_likelihoods))) / (-np.log(2) * num_pixels)
+
+    # Bring both images back to 0..255 range.
+    x_im = x*255
+    x_hat = tf.clip_by_value(x_hat, 0, 1)
+    x_hat_im = tf.round(x_hat * 255)
+
+    mse = tf.reduce_mean(tf.squared_difference(x_im, x_hat_im))
+    psnr = tf.squeeze(tf.image.psnr(x_hat_im, x_im, 255))
+    msssim = tf.squeeze(tf.image.ssim_multiscale(x_hat_im, x_im, 255))
+
+    
+    ac_list = [(i*8,j*8,k*8) for i in range(4,33) for j in range(4,33) for k in range(4,33)]
 
     f = open("result.csv", "w")
-    for i in np.arange(0,8):
-      count_bpp = 0
-      count_np = 0
-      count_mse =0
-      for filename in glob.glob("kodak/*.png"):
+    for acs in ac_list:
+      if acs[1]==32 and acs[2]==32:
+        print(acs[0])
+      for i in np.arange(0,8):
+        count_bpp = 0
+        count_mse =0
+        for filename in glob.glob("kodak/*.png"):
+          v_lmbda_level, v_eval_bpp, v_mse = sess.run( [lmbda_level, eval_bpp, mse], 
+                feed_dict={ fn: filename, 
+                            lmbda_level: i, 
+                            actives[0]: acs[0],
+                            actives[1]: acs[1],
+                            actives[2]: acs[2]})
 
-        v_lmbda_level, v_eval_bpp, v_mse, v_num_pixels = sess.run(
-            [lmbda_level, eval_bpp, mse, num_pixels], feed_dict={fn: filename, lmbda_level: i})
-
-
-        print("%.2f, %s, %.4f, %.4f, %d"%(v_lmbda_level, filename, v_eval_bpp, v_mse, v_num_pixels), file=f)
-        #print("%.2f\t%.4f\t%.4f"%(v_lmbda_level, v_eval_bpp, v_mse))
-        #count_bpp += v_eval_bpp * v_num_pixels
-        #count_mse += v_mse * v_num_pixels
-        #count_np += v_num_pixels
-      #print("%.2f\t%.4f\t%.4f"%(v_lmbda_level, count_bpp/count_np, count_mse/count_np))
-    f.close()  
+          count_bpp += v_eval_bpp
+          count_mse += v_mse
+        print("%d, %d, %d, %d, %.4f, %.4f"%(acs[0], acs[1], acs[2], v_lmbda_level, count_bpp/24.0, count_mse/24.0), file=f)
+        
+    f.close()
 
 
 def parse_args(argv):

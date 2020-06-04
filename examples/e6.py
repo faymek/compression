@@ -454,9 +454,10 @@ class DyTFC():
 
 def test_compress(args):
   """Compresses an image."""
+  fn = tf.placeholder(tf.string, [])
 
   # Load input image and add batch dimension.
-  x = read_png(args.input_file)
+  x = read_png(fn)
   x = tf.expand_dims(x, 0)
   x.set_shape([1, None, None, 3])
   x_shape = tf.shape(x)
@@ -514,6 +515,8 @@ def test_compress(args):
     #return
 
     const = tf.constant([1]*256+[0]*224,dtype=tf.float32)
+    f = open("e6.csv", "w")
+    print("active, fn, bpp, mse, np", file=f)
     for active in range(256,31,-16):
       #conditional_bottleneck.input_spec = tf.keras.layers.InputSpec(ndim=4, axes={3: active})
       mask = const[256-active:512-active]
@@ -538,20 +541,24 @@ def test_compress(args):
       psnr = tf.squeeze(tf.image.psnr(x_hat, x, 255))
       msssim = tf.squeeze(tf.image.ssim_multiscale(x_hat, x, 255))
         
-      tensors = [string, side_string,
-                tf.shape(x)[1:-1], tf.shape(y)[1:-1], tf.shape(z)[1:-1]]
-      arrays = sess.run(tensors)
+      #tensors = [string, side_string,
+      #          tf.shape(x)[1:-1], tf.shape(y)[1:-1], tf.shape(z)[1:-1]]
+      #arrays = sess.run(tensors)
 
       # Write a binary file with the shape information and the compressed string.
-      packed = tfc.PackedTensors()
-      packed.pack(tensors, arrays)
+      #packed = tfc.PackedTensors()
+      #packed.pack(tensors, arrays)
       
+      
+      for filename in glob.glob("kodak/*.png"):
 
-      v_eval_bpp, v_mse, v_psnr, v_msssim, v_num_pixels = sess.run(
-          [eval_bpp, mse, psnr, msssim, num_pixels])
-      bpp = len(packed.string) * 8 / v_num_pixels
+        v_eval_bpp, v_mse, v_num_pixels = sess.run(
+            [eval_bpp, mse, num_pixels], feed_dict={fn: filename})
 
-      print(active, v_eval_bpp, v_psnr, sep='\t')
+        print("%.2f, %s, %.4f, %.4f, %d"%(active, filename, v_eval_bpp, v_mse, v_num_pixels), file=f)
+
+    f.close()  
+
 
 
 def test_decompress(args):
