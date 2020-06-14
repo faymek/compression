@@ -326,7 +326,8 @@ def test_compress(args):
     latest = tf.train.latest_checkpoint(checkpoint_dir=args.checkpoint_dir)
     tf.train.Saver().restore(sess, save_path=latest)
 
-    f = open("result.csv", "w")
+    f = open("f4.csv", "w")
+    print("level, fn, bpp, mse, np", file=f)
     for i in np.arange(0,8):
       for filename in glob.glob("kodak/*.png"):
 

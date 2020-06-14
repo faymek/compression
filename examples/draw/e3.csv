@@ -1,4 +1,4 @@
-active, fn, bpp, mse, np
+active,fn,bpp,mse,np
 256.00, kodak/kodim03.png, 0.6627, 11.9752, 393216
 256.00, kodak/kodim08.png, 1.6279, 43.0793, 393216
 256.00, kodak/kodim21.png, 1.0342, 20.3975, 393216

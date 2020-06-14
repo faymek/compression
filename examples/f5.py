@@ -283,6 +283,94 @@ def test_train(args):
       sess.run(train_op)
       
 
+def test_compress_mask(args):
+  """Compresses an image."""
+
+  # Load input image and add batch dimension.
+  fn = tf.placeholder(tf.string, [])
+
+  x = read_png(fn)
+  x = tf.expand_dims(x, 0)
+  x.set_shape([1, None, None, 3])
+  x_shape = tf.shape(x)
+
+  lmbda_level = tf.placeholder(tf.int32, [])
+  lmbda_onehot = tf.one_hot(tf.reshape(lmbda_level,[1]), depth=8)
+  lmbda = 0.1 * tf.pow(2.0, tf.cast(lmbda_level, tf.float32) - 6.0)
+
+  actives = [tf.constant(256), tf.constant(256), tf.constant(256), tf.constant(3)]
+  
+  # Instantiate model.
+  analysis_transform = AnalysisTransform(args.num_filters, lmbda_onehot)
+  synthesis_transform = SynthesisTransform(args.num_filters, lmbda_onehot, actives)
+  hyper_analysis_transform = HyperAnalysisTransform(args.num_filters, lmbda_onehot)
+  hyper_synthesis_transform = HyperSynthesisTransform(args.num_filters, lmbda_onehot)
+  entropy_bottleneck = tfc.EntropyBottleneck()
+
+  # Transform and compress the image.
+  y = analysis_transform(x)
+  y_shape = tf.shape(y)
+  z = hyper_analysis_transform(abs(y))
+  z_hat, z_likelihoods = entropy_bottleneck(z, training=False)
+  sigma = hyper_synthesis_transform(z_hat)
+  sigma = sigma[:, :y_shape[1], :y_shape[2], :]
+  scale_table = np.exp(np.linspace(
+      np.log(SCALES_MIN), np.log(SCALES_MAX), SCALES_LEVELS))
+  conditional_bottleneck = tfc.GaussianConditional(sigma, scale_table)
+  side_string = entropy_bottleneck.compress(z)
+  string = conditional_bottleneck.compress(y)
+
+  # Transform the quantized image back (if requested).
+  y_hat, y_likelihoods = conditional_bottleneck(y, training=False)
+  x_hat = synthesis_transform(y_hat)
+  x_hat = x_hat[:, :x_shape[1], :x_shape[2], :]
+
+  num_pixels = tf.cast(tf.reduce_prod(tf.shape(x)[:-1]), dtype=tf.float32)
+
+  # Total number of bits divided by number of pixels.
+  eval_bpp = (tf.reduce_sum(tf.log(y_likelihoods)) +
+              tf.reduce_sum(tf.log(z_likelihoods))) / (-np.log(2) * num_pixels)
+
+  # Bring both images back to 0..255 range.
+  x_im = x*255
+  x_hat = tf.clip_by_value(x_hat, 0, 1)
+  x_hat_im = tf.round(x_hat * 255)
+
+  mse = tf.reduce_mean(tf.squared_difference(x_im, x_hat_im))
+  psnr = tf.squeeze(tf.image.psnr(x_hat_im, x_im, 255))
+  msssim = tf.squeeze(tf.image.ssim_multiscale(x_hat_im, x_im, 255))
+
+  with tf.Session() as sess:
+    # Load the latest model checkpoint, get the compressed string and the tensor
+    # shapes.
+    latest = tf.train.latest_checkpoint(checkpoint_dir=args.checkpoint_dir)
+    tf.train.Saver().restore(sess, save_path=latest)
+
+    tn_iter = {
+      "trans": ["analysis", "hyper_analysis", "hyper_synthesis", "synthesis"],
+      "layers": [4,3,3,3],
+      "ops": ["fc_u"]
+    }
+
+    tn_names = ["{}_transform/layer_{}/{}/Softplus:0".format(tran,ln,op) \
+                  for tran, layer in zip(tn_iter["trans"], tn_iter["layers"]) \
+                  for ln in range(layer) for op in tn_iter["ops"]]
+    print(tn_names)
+
+    import pandas as pd
+
+    df = pd.DataFrame()
+
+    for i in np.arange(0,8):
+      for name in tn_names:
+        tn = tf.get_default_graph().get_tensor_by_name(name)
+        tnv = sess.run(tf.reshape(tn, [256]), feed_dict={lmbda_level: i})
+        df1 = pd.DataFrame({"level":i, "name":name, "width":range(256), "value":tnv})
+        df = df.append(df1)
+    df.to_csv("dynamic_mask.csv") 
+
+
+
 def test_compress(args):
   """Compresses an image."""
 
@@ -368,9 +456,13 @@ def test_compress(args):
     msssim = tf.squeeze(tf.image.ssim_multiscale(x_hat_im, x_im, 255))
 
     
-    ac_list = [(i*8,j*8,k*8) for i in range(4,33) for j in range(4,33) for k in range(4,33)]
+    #ac_list = [(i*8,j*8,k*8) for i in range(4,33) for j in range(4,33) for k in range(4,33)]
+    ac_list = [(i,j,k)  for i in [32, 88, 128, 192, 256]
+                        for j in [32, 72, 128, 168, 256]
+                        for k in [32, 64, 96, 144, 256]]
 
-    f = open("result.csv", "w")
+    f = open("f5.csv", "w")
+    print("hash,level,bpp,mse", file=f)
     for acs in ac_list:
       if acs[1]==32 and acs[2]==32:
         print(acs[0])
@@ -387,7 +479,7 @@ def test_compress(args):
 
           count_bpp += v_eval_bpp
           count_mse += v_mse
-        print("%d, %d, %d, %d, %.4f, %.4f"%(acs[0], acs[1], acs[2], v_lmbda_level, count_bpp/24.0, count_mse/24.0), file=f)
+        print("%03d%03d%03d, %d, %.4f, %.4f"%(acs[0], acs[1], acs[2], v_lmbda_level, count_bpp/24.0, count_mse/24.0), file=f)
         
     f.close()
 

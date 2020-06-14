@@ -276,9 +276,10 @@ def test_compress(args):
   x.set_shape([1, None, None, 3])
   x_shape = tf.shape(x)
 
-  lmbda_level = tf.placeholder(tf.int32, [])
-  lmbda_onehot = tf.one_hot(tf.reshape(lmbda_level,[1]), depth=8)
-  lmbda = 0.1 * tf.pow(2.0, tf.cast(lmbda_level, tf.float32) - 6.0)
+
+  lmbda_level = tf.random_uniform([], minval=0, maxval = 64, dtype=tf.int32)
+  lmbda_onehot = tf.one_hot(tf.reshape(lmbda_level,[1]), depth=64)
+  lmbda = 0.1 * tf.pow(2.0, tf.cast(lmbda_level, tf.float32)/8.0 - 7.0)
 
   # Instantiate model.
   analysis_transform = AnalysisTransform(args.num_filters, lmbda_onehot)
@@ -326,51 +327,15 @@ def test_compress(args):
     latest = tf.train.latest_checkpoint(checkpoint_dir=args.checkpoint_dir)
     tf.train.Saver().restore(sess, save_path=latest)
 
-    tn_iter = {
-      "trans": ["analysis", "hyper_analysis", "hyper_synthesis", "synthesis"],
-      "layers": [4,3,3,3],
-      "ops": ["fc_u"]
-    }
-
-    tn_names = ["{}_transform/layer_{}/{}/Softplus:0".format(tran,ln,op) \
-                  for tran, layer in zip(tn_iter["trans"], tn_iter["layers"]) \
-                  for ln in range(layer) for op in tn_iter["ops"]]
-    print(tn_names)
-
-    import pandas as pd
-
-    df = pd.DataFrame()
-
-    for i in np.arange(0,8):
-      for name in tn_names:
-        tn = tf.get_default_graph().get_tensor_by_name(name)
-        tnv = sess.run(tf.reshape(tn, [256]), feed_dict={lmbda_level: i})
-        df1 = pd.DataFrame({"level":i, "name":name, "width":range(256), "value":tnv})
-        df = df.append(df1)
-    df.to_csv("mask.csv") 
-
-    return
-
-    tensors = [string, side_string,
-               tf.shape(x)[1:-1], tf.shape(y)[1:-1], tf.shape(z)[1:-1]]
-
-    f = open("result.csv", "w")
-    for i in np.arange(0,8):
-      count_bpp = 0
-      count_np = 0
-      count_mse =0
+    f = open("f6.csv", "w")
+    print("level, fn, bpp, mse, np", file=f)
+    for i in np.arange(0, 64):
       for filename in glob.glob("kodak/*.png"):
 
         v_lmbda_level, v_eval_bpp, v_mse, v_num_pixels = sess.run(
             [lmbda_level, eval_bpp, mse, num_pixels], feed_dict={fn: filename, lmbda_level: i})
 
-
         print("%.2f, %s, %.4f, %.4f, %d"%(v_lmbda_level, filename, v_eval_bpp, v_mse, v_num_pixels), file=f)
-        #print("%.2f\t%.4f\t%.4f"%(v_lmbda_level, v_eval_bpp, v_mse))
-        #count_bpp += v_eval_bpp * v_num_pixels
-        #count_mse += v_mse * v_num_pixels
-        #count_np += v_num_pixels
-      #print("%.2f\t%.4f\t%.4f"%(v_lmbda_level, count_bpp/count_np, count_mse/count_np))
     f.close()  
 
 

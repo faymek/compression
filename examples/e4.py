@@ -451,9 +451,10 @@ class DyTFC():
 
 def test_compress(args):
   """Compresses an image."""
+  fn = tf.placeholder(tf.string, [])
 
   # Load input image and add batch dimension.
-  x = read_png(args.input_file)
+  x = read_png(fn)
   x = tf.expand_dims(x, 0)
   x.set_shape([1, None, None, 3])
   x_shape = tf.shape(x)
@@ -509,46 +510,40 @@ def test_compress(args):
     #np.savetxt('ay.csv', a, delimiter = ',')
     #np.savetxt('bz.csv', b, delimiter = ',')
     #return
+    rand_rate = tf.placeholder(tf.float32, [])
+    random_tensor = tf.random_uniform([256], dtype=tf.float32)
+    keep_prob = 1 - rand_rate
+    scale = 1 / keep_prob
+    keep_mask = random_tensor >= rand_rate
+    y_hat_drop = y_hat * scale * tf.cast(keep_mask, tf.float32)
 
-    const = tf.constant([1]*256+[0]*224,dtype=tf.float32)
-    for active in range(256,31,-16):
-      #conditional_bottleneck.input_spec = tf.keras.layers.InputSpec(ndim=4, axes={3: active})
-      mask = const[256-active:512-active]
-      rate = tf.reduce_sum(mask) / 256
-      y_itc = y * mask/rate
+    x_hat = synthesis_transform(y_hat_drop)
+    x_hat = x_hat[:, :x_shape[1], :x_shape[2], :]
 
-      string = conditional_bottleneck.compress(y_itc)
-      y_itc_hat = conditional_bottleneck.decompress(string)
+    eval_bpp = (tf.reduce_sum(tf.log(y_likelihoods)) * keep_prob +
+                tf.reduce_sum(tf.log(z_likelihoods))) / (-np.log(2) * num_pixels)
 
-      # Transform the quantized image back (if requested).
-      x_hat = synthesis_transform(y_itc_hat)
-      x_hat = x_hat[:, :x_shape[1], :x_shape[2], :]
+  
+    x_hat = tf.clip_by_value(x_hat, 0, 1)
+    x_hat = tf.round(x_hat * 255)
 
-      eval_bpp = (tf.reduce_sum(tf.log(y_likelihoods[:,:,:,:active])) +
-                  tf.reduce_sum(tf.log(z_likelihoods))) / (-np.log(2) * num_pixels)
+    mse = tf.reduce_mean(tf.squared_difference(x, x_hat))
+    psnr = tf.squeeze(tf.image.psnr(x_hat, x, 255))
+    msssim = tf.squeeze(tf.image.ssim_multiscale(x_hat, x, 255))
 
-    
-      x_hat = tf.clip_by_value(x_hat, 0, 1)
-      x_hat = tf.round(x_hat * 255)
-
-      mse = tf.reduce_mean(tf.squared_difference(x, x_hat))
-      psnr = tf.squeeze(tf.image.psnr(x_hat, x, 255))
-      msssim = tf.squeeze(tf.image.ssim_multiscale(x_hat, x, 255))
-        
-      tensors = [string, side_string,
-                tf.shape(x)[1:-1], tf.shape(y)[1:-1], tf.shape(z)[1:-1]]
-      arrays = sess.run(tensors)
-
-      # Write a binary file with the shape information and the compressed string.
-      packed = tfc.PackedTensors()
-      packed.pack(tensors, arrays)
+    f = open("e4.csv", "w")
+    print("active,fn,bpp,mse,np", file=f)
+    for rr in np.arange(0.0,0.8,0.05):
       
+      for i in range(3):
+        for filename in glob.glob("kodak/*.png"):
 
-      v_eval_bpp, v_mse, v_psnr, v_msssim, v_num_pixels = sess.run(
-          [eval_bpp, mse, psnr, msssim, num_pixels])
-      bpp = len(packed.string) * 8 / v_num_pixels
+          v_eval_bpp, v_mse, v_num_pixels = sess.run(
+              [eval_bpp, mse, num_pixels], feed_dict={fn: filename, rand_rate:rr})
 
-      print(active, v_eval_bpp, bpp, v_mse, v_psnr, v_msssim, v_num_pixels)
+          print("%.2f, %s, %.4f, %.4f, %d"%(rr, filename, v_eval_bpp, v_mse, v_num_pixels), file=f)
+
+    f.close()  
 
 
 def test_decompress(args):
